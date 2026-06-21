@@ -24,6 +24,7 @@ FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/config/package.json    packages/config/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
 COPY apps/web/package.json           apps/web/package.json
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile --filter "@dopamine/web..."
@@ -34,6 +35,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY packages packages
 COPY apps/web apps/web
 RUN pnpm --filter "@dopamine/contracts" build \
+ && pnpm --filter "@dopamine/sdk" build \
  && pnpm --filter "@dopamine/web" build
 
 # ---- runtime: standalone server, non-root ----------------------------------
