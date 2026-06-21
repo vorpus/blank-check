@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { APP_FILTER, APP_GUARD, APP_PIPE } from "@nestjs/core";
 
+import { CartModule } from "./cart/cart.module";
 import { CatalogModule } from "./catalog/catalog.module";
 import { ErrorEnvelopeFilter } from "./common/error-envelope.filter";
 import { ZodValidationPipe } from "./common/zod-validation.pipe";
@@ -10,6 +11,7 @@ import { GenerationGatewayModule } from "./generation/generation.module";
 import { HealthModule } from "./health/health.module";
 import { DeviceAuthGuard } from "./identity/device-auth.guard";
 import { IdentityModule } from "./identity/identity.module";
+import { OrdersModule } from "./orders/orders.module";
 import { PrismaModule } from "./prisma/prisma.module";
 import { QueueModule } from "./queue/queue.module";
 import { RedisModule } from "./redis/redis.module";
@@ -39,11 +41,13 @@ import { VerticalRegistryModule } from "./vertical-registry/vertical-registry.mo
     StorageModule,
     EventsModule,
     VerticalRegistryModule,
-    // Features (generation slice)
+    // Features (generation slice + order slice)
     IdentityModule,
     CatalogModule,
     SearchModule,
     GenerationGatewayModule,
+    CartModule,
+    OrdersModule,
     HealthModule,
   ],
   providers: [

@@ -117,3 +117,6 @@ export {
   type BearerToken,
   type DeviceIdentityResponse,
 } from "./identity.js";
+
+// Tracking snapshot (doc 05 §5.1 — ADDITIVE, Milestone 3b)
+export { TrackingSnapshotSchema, type TrackingSnapshot } from "./tracking.js";

@@ -3,7 +3,7 @@ import { Queue } from "bullmq";
 
 import { RedisService } from "../redis/redis.service";
 
-import { GENERATION_ENRICH_QUEUE, QUEUE_NAMES } from "./queue.constants";
+import { FULFILLMENT_ADVANCE_QUEUE, GENERATION_ENRICH_QUEUE, QUEUE_NAMES } from "./queue.constants";
 
 /**
  * Owns the producer-side BullMQ `Queue` so its connection is closed on shutdown.
@@ -24,6 +24,32 @@ class GenerationEnrichQueueProvider implements OnModuleDestroy {
         backoff: { type: "exponential", delay: 500 },
         removeOnComplete: 1000,
         removeOnFail: 5000, // keep failed jobs as the DLQ surface
+      },
+    });
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.queue.close();
+  }
+}
+
+/**
+ * The fulfillment.advance producer-side Queue (Milestone 3b). Delayed jobs drive
+ * the order through the retail timeline; each advance schedules the next. Same
+ * lifecycle-owning pattern as the generation queue so a SIGTERM closes its Redis
+ * connection cleanly.
+ */
+class FulfillmentAdvanceQueueProvider implements OnModuleDestroy {
+  readonly queue: Queue;
+
+  constructor(redis: RedisService) {
+    this.queue = new Queue(QUEUE_NAMES.fulfillmentAdvance, {
+      connection: redis.client.duplicate(),
+      defaultJobOptions: {
+        attempts: 5,
+        backoff: { type: "exponential", delay: 500 },
+        removeOnComplete: 1000,
+        removeOnFail: 5000,
       },
     });
   }
@@ -56,9 +82,27 @@ const generationEnrichQueueProvider: Provider = {
   inject: [GenerationEnrichQueueProvider],
 };
 
+const fulfillmentAdvanceOwnerProvider: Provider = {
+  provide: FulfillmentAdvanceQueueProvider,
+  useFactory: (redis: RedisService): FulfillmentAdvanceQueueProvider =>
+    new FulfillmentAdvanceQueueProvider(redis),
+  inject: [RedisService],
+};
+
+const fulfillmentAdvanceQueueProvider: Provider = {
+  provide: FULFILLMENT_ADVANCE_QUEUE,
+  useFactory: (owner: FulfillmentAdvanceQueueProvider): Queue => owner.queue,
+  inject: [FulfillmentAdvanceQueueProvider],
+};
+
 @Global()
 @Module({
-  providers: [queueProvider, generationEnrichQueueProvider],
-  exports: [GENERATION_ENRICH_QUEUE],
+  providers: [
+    queueProvider,
+    generationEnrichQueueProvider,
+    fulfillmentAdvanceOwnerProvider,
+    fulfillmentAdvanceQueueProvider,
+  ],
+  exports: [GENERATION_ENRICH_QUEUE, FULFILLMENT_ADVANCE_QUEUE],
 })
 export class QueueModule {}

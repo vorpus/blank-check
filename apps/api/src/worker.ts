@@ -5,6 +5,7 @@ import { NestFactory } from "@nestjs/core";
 import { StructuredLogger } from "./common/logger";
 import { OutboxRelay } from "./events/outbox-relay.service";
 import { RedisService } from "./redis/redis.service";
+import { FulfillmentWorker } from "./worker/fulfillment.worker";
 import { GenerationWorker } from "./worker/generation.worker";
 import { WorkerModule } from "./worker/worker.module";
 
@@ -24,6 +25,7 @@ export async function bootstrapWorker(): Promise<void> {
   ctx.enableShutdownHooks();
 
   ctx.get(GenerationWorker).run();
+  ctx.get(FulfillmentWorker).run();
   ctx.get(OutboxRelay).start();
 
   const redis = ctx.get(RedisService);

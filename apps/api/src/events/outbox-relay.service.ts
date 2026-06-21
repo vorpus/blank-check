@@ -1,4 +1,4 @@
-import { ImagesDegradedSchema, ImagesReadySchema } from "@dopamine/contracts";
+import { ImagesDegradedSchema, ImagesReadySchema, TrackingEventSchema } from "@dopamine/contracts";
 import { Injectable, type OnModuleDestroy } from "@nestjs/common";
 
 import { StructuredLogger } from "../common/logger";
@@ -123,13 +123,35 @@ export class OutboxRelay implements OnModuleDestroy {
         // metrics; nothing to fan out to the browser.
         return;
       case "order.placed":
+        // Internal signal only — there is no `order.placed` wire event. The first
+        // visible client event is the initial state's tracking_event (or, for
+        // Stage 1's `confirmed` initial state, the order detail the client already
+        // has). Nothing to fan out.
+        return;
       case "order.transition": {
-        // Seam for 3b: the tracking event projection lands with the orders module.
-        // We still publish a thin notification so the 3b gateway has a channel.
-        // TODO(3b): map the order event onto the public TrackingEventSchema wire
-        // shape (like images.ready/degraded above) instead of publishing the raw
-        // internal DomainEvent JSON.
-        await this.redis.client.publish(orderChannel(event.orderId), JSON.stringify(event));
+        // M3 RESOLVED: map the internal order.transition onto the PUBLIC
+        // TrackingEventSchema wire shape (mirroring images.ready/degraded above).
+        // The `seq` + `label` + `display` come from the persisted tracking_events
+        // row written atomically with the state change — so the wire event is a
+        // faithful projection of the durable, gap-free per-order log (NOT a Redis
+        // counter). The SSE gateway frames this with `id:`=seq directly.
+        const row = await this.prisma.trackingEvent.findUnique({
+          where: { orderId_seq: { orderId: event.orderId, seq: event.seq } },
+        });
+        if (!row) {
+          this.logger.warn(`order.transition ${event.orderId}#${String(event.seq)} has no tracking_event row`);
+          return;
+        }
+        const wire = TrackingEventSchema.parse({
+          type: "tracking_event",
+          seq: row.seq,
+          ts: row.occurredAt.toISOString(),
+          orderId: row.orderId,
+          state: row.state,
+          label: row.label,
+          ...(extractDisplay(row.payload) ? { display: extractDisplay(row.payload) } : {}),
+        });
+        await this.redis.client.publish(orderChannel(event.orderId), JSON.stringify(wire));
         return;
       }
       default: {
@@ -139,11 +161,22 @@ export class OutboxRelay implements OnModuleDestroy {
     }
   }
 
-  /** Per-generation monotonic seq for the realtime event contract (charter §4.3). */
+  /**
+   * Per-GENERATION monotonic seq for the images.ready/degraded swap events
+   * (charter §4.3). Generation swaps have no persisted per-batch log, so a Redis
+   * counter is the right cursor here. (M4 — order tracking seq — is now derived
+   * from the durable `tracking_events` PK in the order.transition case above, NOT
+   * from this counter.)
+   */
   private async nextSeq(generationId: string): Promise<number> {
-    // TODO(3b): for ORDER tracking events, derive `seq` from the tracking_events
-    // PK (a durable, gap-free per-order sequence) rather than this Redis counter,
-    // which resets if Redis is flushed and isn't tied to the persisted projection.
     return this.redis.client.incr(`seq:gen:${generationId}`);
   }
+}
+
+/** Pull the optional `display` block stamped on a tracking_event payload. */
+function extractDisplay(payload: unknown): unknown {
+  if (payload && typeof payload === "object" && "display" in payload) {
+    return (payload).display;
+  }
+  return undefined;
 }

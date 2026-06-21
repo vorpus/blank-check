@@ -4,12 +4,15 @@ import { CatalogModule } from "../catalog/catalog.module";
 import { ConfigModule } from "../config/config.module";
 import { EventsModule } from "../events/events.module";
 import { GenerationGatewayModule } from "../generation/generation.module";
+import { OrdersModule } from "../orders/orders.module";
 import { PrismaModule } from "../prisma/prisma.module";
 import { QueueModule } from "../queue/queue.module";
 import { RedisModule } from "../redis/redis.module";
 import { StorageModule } from "../storage/storage.module";
 import { VerticalRegistryModule } from "../vertical-registry/vertical-registry.module";
 
+import { FulfillmentService } from "./fulfillment.service";
+import { FulfillmentWorker } from "./fulfillment.worker";
 import { GenerationWorker } from "./generation.worker";
 
 /**
@@ -29,8 +32,9 @@ import { GenerationWorker } from "./generation.worker";
     VerticalRegistryModule,
     CatalogModule,
     GenerationGatewayModule,
+    OrdersModule,
   ],
-  providers: [GenerationWorker],
-  exports: [GenerationWorker],
+  providers: [GenerationWorker, FulfillmentWorker, FulfillmentService],
+  exports: [GenerationWorker, FulfillmentWorker, FulfillmentService],
 })
 export class WorkerModule {}
