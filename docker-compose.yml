@@ -24,6 +24,9 @@ x-app-env: &app-env
   S3_FORCE_PATH_STYLE: "true"          # MinIO needs path-style; R2 too
   S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-http://localhost:9000/listing-images}
   FAKEGEN_URL: http://fake-gen:8090
+  # Fulfillment time compression (consumed by the worker; harmless on api/migrate/
+  # seed). Default 12000 → ~3.5s observable confirmed→delivered timeline.
+  TIME_SCALE: ${TIME_SCALE:-12000}
   NODE_ENV: production
 
 # Anchor for the shared api image build, reused by api/worker/migrate/seed so
@@ -190,6 +193,12 @@ services:
     environment:
       <<: *app-env                         # S3_* for placeholder image writes
       PORT: "8090"
+      # Demo/latency knobs (charter §5.5.6): instant skeleton, visible media swap.
+      FAKE_TEXT_DELAY_MS: ${FAKE_TEXT_DELAY_MS:-0}
+      FAKE_MEDIA_DELAY_MS: ${FAKE_MEDIA_DELAY_MS:-1200}
+      FAKE_FAILURE_RATE: ${FAKE_FAILURE_RATE:-0}
+      FAKE_DEFAULT_COUNT: ${FAKE_DEFAULT_COUNT:-8}
+      FAKE_GRID_MAX: ${FAKE_GRID_MAX:-24}
     ports: ["8090:8090"]
     # Per charter 5.5.2: fake-gen needs NO datastore deps -- only the bucket,
     # because it writes placeholder images to MinIO via the S3 API.
@@ -201,7 +210,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://localhost:8090/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - "fetch('http://localhost:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 5s
       timeout: 3s
       retries: 12

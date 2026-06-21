@@ -23,7 +23,11 @@ case "$ROLE" in
     ;;
   migrate)
     # production-safe: applies committed migrations only (never `migrate dev`).
-    exec pnpm exec prisma migrate deploy
+    # Invoke the prisma CLI DIRECTLY (copied into the image), not via
+    # `pnpm exec` — that would make corepack try to download a package manager at
+    # container start, which fails as the non-root `app` user. node_modules/.bin
+    # resolves the workspace-linked prisma bin.
+    exec ./node_modules/.bin/prisma migrate deploy
     ;;
   seed)
     # idempotent: upserts by stable slug/key so `make seed` is re-runnable.

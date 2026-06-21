@@ -11,7 +11,18 @@
 
 generator client {
   provider = "prisma-client-js"
-  // Emit into the app's node_modules/.prisma so the shared Docker image can copy it.
+  // Default output: the generated client lands beside the @prisma/client package
+  // in pnpm's store-backed dir (node_modules/.pnpm/@prisma+client@…/node_modules/
+  // .prisma/client). Keeping the DEFAULT output means the `@prisma/client` barrel
+  // type-resolves correctly under pnpm (a custom output breaks the barrel's
+  // re-export of Prisma.InputJsonValue etc.). The Docker runtime stage copies the
+  // generated client from that store path (see apps/api/Dockerfile).
+  //
+  // binaryTargets: the host generates the native query engine, but the runtime
+  // image is node:22-slim (Debian, OpenSSL 3). Generate the native engine (so
+  // `node dist` works on the host) AND the Debian engines the container needs
+  // (amd64 + arm64), so the engine shipped in the image matches its base OS.
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
 }
 
 datasource db {

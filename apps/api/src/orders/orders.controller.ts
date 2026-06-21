@@ -98,13 +98,14 @@ export class OrdersController {
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
     @Query("token") token: string | undefined,
+    @Query("lastEventId") lastEventIdQuery: string | undefined,
     @Headers("authorization") authHeader: string | undefined,
     @Headers("last-event-id") lastEventIdHeader: string | undefined,
   ): Promise<void> {
     const principal = this.authStream(authHeader, token);
     // Authorize: the order must belong to the principal (404 otherwise).
     await this.orders.get(principal.userId, id);
-    const lastEventId = parseLastEventId(req, lastEventIdHeader);
+    const lastEventId = parseLastEventId(req, lastEventIdHeader, lastEventIdQuery);
     await this.realtime.streamOrder(res, id, lastEventId);
   }
 
@@ -133,9 +134,25 @@ export class OrdersController {
   }
 }
 
-/** Parse the Last-Event-ID (header value or the EventSource-resent request header). */
-function parseLastEventId(req: FastifyRequest, headerValue: string | undefined): number | null {
-  const raw = headerValue ?? (req.headers["last-event-id"] as string | undefined);
+/**
+ * Resolve the SSE resume cursor from EITHER the `last-event-id` header (browser
+ * EventSource sets this on RECONNECT only) OR the `lastEventId` query param (the
+ * SDK's TrackingClient carries it on the INITIAL connect, since an EventSource
+ * constructor can't set request headers). Closing this gap makes tracking
+ * gap-free across the snapshot→subscribe seam (charter §4.3): the api replays
+ * `tracking_events WHERE seq > cursor` before live streaming regardless of which
+ * channel the client used. The header wins if both are present (reconnect is the
+ * authoritative resume point); the client de-dupes by seq either way.
+ */
+function parseLastEventId(
+  req: FastifyRequest,
+  headerValue: string | undefined,
+  queryValue: string | undefined,
+): number | null {
+  const raw =
+    headerValue ??
+    (req.headers["last-event-id"] as string | undefined) ??
+    queryValue;
   if (raw === undefined) return null;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) ? n : null;

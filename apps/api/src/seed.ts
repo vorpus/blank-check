@@ -1,3 +1,4 @@
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { formatId, ID_PREFIXES } from "@dopamine/contracts";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { ulid } from "ulid";
@@ -18,11 +19,26 @@ const prisma = new PrismaClient();
 // Deterministic ids so re-seeding upserts the same rows (idempotent).
 const STOREFRONT_ID = formatId(ID_PREFIXES.storefront, "00000000000000000000000001");
 
+// Public base url the BROWSER consumes (MinIO locally → CDN in Stage 5). Derived
+// from env so seed image urls stay consistent with the api's S3 wiring; falls
+// back to the local default so `node dist/seed.js` works without any env.
+const PUBLIC_BASE_URL = (process.env.S3_PUBLIC_BASE_URL ?? "http://localhost:9000/listing-images").replace(/\/$/, "");
+const S3_BUCKET = process.env.S3_BUCKET ?? "listing-images";
+
+/** Object key under the bucket for a seed listing's placeholder hero. */
+function seedImageKey(seed: string): string {
+  return `seed/${seed}.svg`;
+}
+
+function seedImageUrl(seed: string): string {
+  return `${PUBLIC_BASE_URL}/${seedImageKey(seed)}`;
+}
+
 function readyMedia(seed: string): Prisma.InputJsonValue {
   return {
     status: "ready",
     hero: {
-      url: `http://localhost:9000/listing-images/seed/${seed}.svg`,
+      url: seedImageUrl(seed),
       kind: "image",
       blurhash: null,
       aspect_ratio: 1,
@@ -31,6 +47,59 @@ function readyMedia(seed: string): Prisma.InputJsonValue {
     expected_ready_ms: null,
     generation_id: `gen_seed_${seed}`,
   };
+}
+
+/**
+ * A deterministic, self-contained placeholder SVG for a seed listing. Mirrors the
+ * fake-gen placeholder style (a labelled solid-color tile) so the seeded catalog
+ * renders real images cold — without these bytes in MinIO the seed hero urls 404
+ * (charter §6 criterion 1: "browse the seeded catalog and open a listing").
+ */
+function seedSvg(title: string, seed: string): Buffer {
+  // Stable hue from the slug so each tile has a distinct, deterministic color.
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
+  const label = title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600" role="img" aria-label="${label}">
+  <rect width="600" height="600" fill="hsl(${String(h)},55%,82%)"/>
+  <rect x="40" y="40" width="520" height="520" rx="24" fill="hsl(${String(h)},45%,70%)"/>
+  <text x="300" y="310" font-family="system-ui,sans-serif" font-size="30" font-weight="600" fill="hsl(${String(h)},40%,28%)" text-anchor="middle">${label}</text>
+</svg>`;
+  return Buffer.from(svg, "utf8");
+}
+
+/**
+ * Upload every seed listing's placeholder SVG to MinIO (idempotent PUT — the
+ * bucket is created by the minio-init one-shot before `seed` runs). The seed
+ * OWNS its image bytes just like the generation path: a provider never writes our
+ * bucket. Skipped only if the S3 endpoint is unreachable (logged, non-fatal) so a
+ * DB-only re-seed during dev doesn't hard-fail.
+ */
+async function uploadSeedImages(slugs: { title: string; seed: string }[]): Promise<void> {
+  const endpoint = process.env.S3_ENDPOINT ?? "http://minio:9000";
+  const s3 = new S3Client({
+    endpoint,
+    region: process.env.S3_REGION ?? "us-east-1",
+    forcePathStyle: (process.env.S3_FORCE_PATH_STYLE ?? "true") === "true",
+    credentials: {
+      accessKeyId: process.env.S3_ACCESS_KEY_ID ?? "minioadmin",
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin",
+    },
+  });
+  let n = 0;
+  for (const { title, seed } of slugs) {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: seedImageKey(seed),
+        Body: seedSvg(title, seed),
+        ContentType: "image/svg+xml",
+        CacheControl: "public, max-age=31536000, immutable",
+      }),
+    );
+    n++;
+  }
+  process.stdout.write(`seed images: uploaded ${String(n)} placeholder SVGs to ${endpoint}/${S3_BUCKET}/seed/\n`);
 }
 
 interface SeedListing {
@@ -136,7 +205,7 @@ async function main(): Promise<void> {
         categoryId,
         attributes: l.attrs,
         media: readyMedia(slug(l.title)),
-        imageUrls: [`http://localhost:9000/listing-images/seed/${slug(l.title)}.svg`],
+        imageUrls: [seedImageUrl(slug(l.title))],
         status: "ready",
       },
       create: {
@@ -150,7 +219,7 @@ async function main(): Promise<void> {
         currency: "USD",
         attributes: l.attrs,
         media: readyMedia(slug(l.title)),
-        imageUrls: [`http://localhost:9000/listing-images/seed/${slug(l.title)}.svg`],
+        imageUrls: [seedImageUrl(slug(l.title))],
         origin: "seed",
         status: "ready",
         // Only the FIRST listing for a canonical is the dedup anchor; the rest are
@@ -160,6 +229,11 @@ async function main(): Promise<void> {
     });
     count++;
   }
+
+  // 5. Upload the placeholder hero SVGs the listings reference, so the seeded
+  //    catalog renders real (non-404) images cold. Done after the DB writes so a
+  //    storage hiccup can't leave rows pointing at missing images mid-run.
+  await uploadSeedImages(LISTINGS.map((l) => ({ title: l.title, seed: slug(l.title) })));
 
   process.stdout.write(
     `seed complete: 1 vertical, 1 storefront, ${String(CATEGORIES.length)} categories, ${String(count)} listings\n`,

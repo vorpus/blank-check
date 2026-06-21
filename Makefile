@@ -1,19 +1,32 @@
 # Dopamine -- Stage 1 task DX.
 #
-# One-command cold start (once app code exists in later milestones):
+# One-command cold start:
 #   make up && make seed   ->  working app at http://localhost:3000
+#   make e2e               ->  full-loop acceptance E2E against the running stack
 #
 # `make up` autocreates .env, builds images, and blocks on --wait until every
-# healthcheck is green; migrate + seed run as ordered one-shots in the bring-up.
+# long-lived healthcheck is green; migrate + seed + minio-init run as ordered
+# one-shots in the bring-up (pulled in by the dependency graph).
 #
-# NOTE (Stage 1, this milestone): the api/web/worker/fake-gen IMAGES cannot be
-# built until their app source lands (later milestones). Until then, bring up
-# only the datastores with:  make datastores
-COMPOSE := docker compose
-SHELL   := /bin/bash
+# The acceptance demo (charter §6) runs the PRODUCTION-SHAPED stack: built
+# images, standalone Next, the prod entrypoints + healthcheck ordering — i.e.
+# the base docker-compose.yml ONLY, ignoring the dev hot-reload overlay
+# (docker-compose.override.yml). `make dev` opts INTO the overlay for fast local
+# iteration. Every prod-path target below pins `-f docker-compose.yml` so the
+# overlay never silently swaps services to `next dev` / `tsx watch` under us.
+COMPOSE     := docker compose -f docker-compose.yml
+COMPOSE_DEV := docker compose
+SHELL       := /bin/bash
+
+# Long-lived services to block on with `--wait`. The one-shots (migrate, seed,
+# minio-init) are pulled in by the dependency graph and exit 0; `up --wait` flags
+# ANY service that exits while waiting (even code 0), so we wait ONLY on the
+# long-lived set and let the one-shots complete via depends_on. This makes `make
+# up` return green on a fully-healthy stack instead of erroring on a clean exit.
+LONG_LIVED := postgres redis minio api worker fake-gen web
 
 .DEFAULT_GOAL := help
-.PHONY: help up up-build datastores down reset seed migrate logs ps sdk psql mc build
+.PHONY: help up up-build dev datastores down reset seed migrate e2e logs ps sdk sdk-check psql mc build
 
 ## help: list available targets (default)
 help:
@@ -26,13 +39,19 @@ help:
 
 ## up: .env + build images + bring whole stack up, wait for healthy
 up: .env
-	$(COMPOSE) up -d --build --wait
+	$(COMPOSE) up -d --build
+	$(COMPOSE) up -d --wait --no-build $(LONG_LIVED)
 	@echo "stack up -> web http://localhost:3000 . api http://localhost:8080 . minio http://localhost:9001"
 
-## up-build: rebuild all images, then up --wait (no cache reuse forced)
+## up-build: rebuild all images, then up --wait (prod-shaped, no overlay)
 up-build: .env
 	$(COMPOSE) build
-	$(COMPOSE) up -d --wait
+	$(COMPOSE) up -d
+	$(COMPOSE) up -d --wait --no-build $(LONG_LIVED)
+
+## dev: hot-reload stack (opts into docker-compose.override.yml; bind mounts)
+dev: .env
+	$(COMPOSE_DEV) up -d --build --wait
 
 ## datastores: bring up only postgres+redis+minio+minio-init (runnable now)
 datastores: .env
@@ -57,6 +76,10 @@ reset:
 ## seed: re-run the idempotent seed one-shot against the running stack
 seed:
 	$(COMPOSE) run --rm seed
+
+## e2e: run the full-loop acceptance E2E against the running stack (assumes up)
+e2e:
+	node test/e2e/e2e.mjs
 
 ## migrate: apply Prisma migrations without a full restart
 migrate:
