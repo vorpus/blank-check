@@ -23,6 +23,12 @@ export function buildApp(cfg: FakeGenConfig): FastifyInstance {
     bodyLimit: 1 << 20,
   });
   const svc = new GenerationService(cfg);
+  // Bound the in-memory pending-enrichment map (H3): periodic eviction of expired
+  // entries, torn down when Fastify closes so tests / SIGTERM don't leak a timer.
+  svc.startSweep();
+  app.addHook("onClose", () => {
+    svc.stopSweep();
+  });
 
   // --- Liveness -------------------------------------------------------------
   app.get("/healthz", () => ({ status: "ok", service: "fake-gen" }));

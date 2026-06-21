@@ -37,6 +37,19 @@ interface PendingEnrichment {
   readyAt: number; // epoch ms when final media becomes available
 }
 
+/**
+ * How long past `readyAt` we keep a pending entry before evicting it (bounding
+ * the in-memory `pending` map — H3). Entries are cheap to recompute, so once the
+ * worker has had ample time to drain the swap we drop them; a late poll for an
+ * evicted batch falls through to the harmless `generating_media`/empty path
+ * (same as an unknown batch after a restart). The window is a multiple of
+ * `mediaDelayMs` with a floor so a 0-delay config still retains for a sane span.
+ */
+const RETENTION_FACTOR = 10;
+const MIN_RETENTION_MS = 60_000;
+/** Periodic sweep cadence — bounds the map even if `mediaFor` is never called. */
+const SWEEP_INTERVAL_MS = 30_000;
+
 const sleep = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
 
@@ -52,8 +65,43 @@ function chunkWords(s: string, n: number): string[] {
 
 export class GenerationService {
   private readonly pending = new Map<string, PendingEnrichment>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly cfg: FakeGenConfig) {}
+
+  /** epoch ms after which a pending entry is safe to evict. */
+  private expiryFor(readyAt: number): number {
+    return readyAt + Math.max(MIN_RETENTION_MS, this.cfg.mediaDelayMs * RETENTION_FACTOR);
+  }
+
+  /** Drop pending entries past their retention window. Bounds the map (H3). */
+  private sweep(now = Date.now()): void {
+    for (const [batchId, entry] of this.pending) {
+      if (now >= this.expiryFor(entry.readyAt)) this.pending.delete(batchId);
+    }
+  }
+
+  /**
+   * Start the periodic eviction sweep (H3). Idempotent. `unref`'d so it never
+   * keeps the process alive. Call `stopSweep()` on shutdown / in tests.
+   */
+  startSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
+    this.sweepTimer.unref?.();
+  }
+
+  stopSweep(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+  }
+
+  /** Test-only: current pending map size (to assert the map stays bounded). */
+  pendingSize(): number {
+    return this.pending.size;
+  }
 
   /**
    * Mint a deterministic batch `generation_id`. Deterministic so the same
@@ -139,8 +187,15 @@ export class GenerationService {
    * `ready` or `degraded` per the deterministic failure decision.
    */
   mediaFor(batchId: string): MediaPollResponse {
-    const pending = this.pending.get(batchId);
     const now = Date.now();
+    // Lazy eviction (H3): if this entry is past its retention window, drop it and
+    // treat it as unknown — keeps the map bounded without a background sweep on
+    // the hot path. Other expired entries are reaped by the periodic sweep.
+    const existing = this.pending.get(batchId);
+    if (existing && now >= this.expiryFor(existing.readyAt)) {
+      this.pending.delete(batchId);
+    }
+    const pending = this.pending.get(batchId);
 
     // Unknown batch (e.g. after restart). We can still re-derive content but not
     // the original count/query — so report not-ready; the worker retries/falls

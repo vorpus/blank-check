@@ -35,6 +35,7 @@ export {
   type TrackingClientOptions,
   type BackoffOptions,
   type Subscription,
+  type TransportMode,
 } from "./tracking-client.js";
 export {
   type EventSourceFactory,

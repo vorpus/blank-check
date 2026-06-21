@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import swc from "unplugin-swc";
 import { defineConfig } from "vitest/config";
 
@@ -22,6 +24,11 @@ export default defineConfig({
   ],
   esbuild: false,
   oxc: false,
+  // Mirror the `@/*` → web-root path alias from tsconfig so component tests can
+  // pull modules that use the production import style (e.g. ListingCard).
+  resolve: {
+    alias: { "@": fileURLToPath(new URL(".", import.meta.url)) },
+  },
   test: {
     include: ["**/*.test.ts", "**/*.test.tsx"],
     exclude: ["node_modules", ".next", "dist"],

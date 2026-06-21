@@ -1,8 +1,9 @@
 "use client";
 
 import { type Order, type RealtimeEvent } from "@dopamine/contracts";
+import { type TransportMode } from "@dopamine/sdk";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useIdentity } from "@/app/providers";
 import { qk } from "@/lib/queryKeys";
@@ -16,7 +17,12 @@ import { getTracking } from "@/lib/sdk";
  *   - subscribes on mount / unsubscribes on unmount,
  *   - folds each `tracking_event` into the `qk.order(id)` cache (ONE data path,
  *     shared with `useOrder` + the polling fallback — doc 03 §4 "one data path"),
- *   - tracks a coarse `{ mode: 'live' | 'polling' }` for the connection badge.
+ *   - mirrors the SDK's REAL transport mode for the connection badge.
+ *
+ * The badge mode is read straight off the subscription (`getMode`/`onModeChange`)
+ * — the SDK is the source of truth for the transport, so there's no cadence
+ * heuristic here. The SDK's transient `connecting` state is shown as `live` (the
+ * badge has two states); only the genuine polling fallback flips it to `polling`.
  *
  * `degraded`/generation frames that arrive on this channel are ignored here (the
  * card-level `useGenerationMedia` owns those); tracking only applies state/display.
@@ -28,26 +34,20 @@ interface UseTrackingResult {
   mode: TrackingMode;
 }
 
+/** The badge has two states; "connecting" is shown optimistically as "live". */
+function toBadgeMode(mode: TransportMode): TrackingMode {
+  return mode === "polling" ? "polling" : "live";
+}
+
 export function useTracking(orderId: string): UseTrackingResult {
   const { ready } = useIdentity();
   const qc = useQueryClient();
   const [mode, setMode] = useState<TrackingMode>("live");
 
-  // The TrackingClient synthesizes a `tracking_event` on each poll tick; once we
-  // see one with no live SSE frame in between, we surface "polling". We infer the
-  // mode from event cadence: SSE frames keep mode "live"; a gap that triggers the
-  // SDK's poll path produces synthetic frames. The SDK doesn't expose mode
-  // directly, so we mark "polling" after a silence window with continued frames.
-  const lastFrameAt = useRef<number>(Date.now());
-
   useEffect(() => {
     if (!ready || !orderId) return;
 
-    let silenceTimer: ReturnType<typeof setInterval> | null = null;
-
     const applyEvent = (e: RealtimeEvent): void => {
-      lastFrameAt.current = Date.now();
-
       // Tracking frames carry the authoritative state + (often) the full display
       // block. Fold them into the order cache; everything else is ignored here.
       if (e.type !== "tracking_event") return;
@@ -65,18 +65,13 @@ export function useTracking(orderId: string): UseTrackingResult {
 
     const sub = getTracking().trackOrder(orderId, applyEvent);
 
-    // Heuristic mode badge: if frames keep arriving on the SDK's poll interval
-    // (≈5s) we can't distinguish from steady SSE, so we treat a >12s gap followed
-    // by renewed frames as the polling regime. This is a functional indicator;
-    // the SDK is the source of truth for actual transport.
-    silenceTimer = setInterval(() => {
-      const since = Date.now() - lastFrameAt.current;
-      setMode(since > 12_000 ? "polling" : "live");
-    }, 4_000);
+    // Mirror the SDK's actual transport mode (no cadence guessing).
+    setMode(toBadgeMode(sub.getMode()));
+    const unsubscribe = sub.onModeChange((m) => setMode(toBadgeMode(m)));
 
     return () => {
+      unsubscribe();
       sub.stop();
-      if (silenceTimer) clearInterval(silenceTimer);
     };
   }, [ready, orderId, qc]);
 

@@ -33,7 +33,14 @@ export class GenerationWorker implements OnModuleDestroy {
         // logs/events correlate with the originating search (fall back to a
         // generation-scoped id for older jobs enqueued before requestId existed).
         requestContext.run({ requestId: job.data.requestId ?? `enrich:${job.data.generationId}` }, async () => {
-          const result = await this.enrich.enrich(job.data);
+          // Thread the BullMQ attempt budget so EnrichService can DEGRADE on the
+          // final attempt instead of retrying a lost batch forever (M3).
+          // `attemptsMade` is the count of attempts already failed; +1 makes the
+          // current attempt 1-based against the configured `attempts` ceiling.
+          const result = await this.enrich.enrich(job.data, {
+            attempt: job.attemptsMade + 1,
+            maxAttempts: job.opts.attempts ?? 1,
+          });
           return result;
         }),
       { connection: this.redis.client.duplicate(), concurrency: 4 },

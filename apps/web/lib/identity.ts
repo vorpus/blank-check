@@ -76,9 +76,43 @@ async function issue(deviceId: string | null): Promise<DeviceIdentityResponse> {
     body: JSON.stringify({ deviceId }),
   });
   if (!res.ok) {
-    throw new Error(`identity bootstrap failed: HTTP ${String(res.status)}`);
+    throw new IdentityIssueError(res.status, deviceId);
   }
   return DeviceIdentityResponseSchema.parse(await res.json());
+}
+
+/** Thrown when `POST /v1/identity/device` itself fails; carries the HTTP status. */
+class IdentityIssueError extends Error {
+  constructor(
+    readonly status: number,
+    readonly deviceId: string | null,
+  ) {
+    super(`identity bootstrap failed: HTTP ${String(status)} (deviceId=${deviceId ?? "null"})`);
+    this.name = "IdentityIssueError";
+  }
+}
+
+/** Wipe the persisted + in-memory identity so the next issue mints a fresh device. */
+function clearIdentity(): void {
+  current = null;
+  if (typeof window !== "undefined") window.localStorage.removeItem(STORAGE_KEY);
+}
+
+/**
+ * Issue a token, RE-BOOTSTRAPPING a fresh device if the issue 401s for a known
+ * device (revoked / wiped server-side — spec §8). The re-mint is attempted ONCE:
+ * a 401 on the fresh `deviceId: null` mint propagates (no infinite loop).
+ */
+async function issueOrRebootstrap(deviceId: string | null): Promise<DeviceIdentityResponse> {
+  try {
+    return await issue(deviceId);
+  } catch (err) {
+    if (err instanceof IdentityIssueError && err.status === 401 && err.deviceId !== null) {
+      clearIdentity();
+      return issue(null); // a SECOND 401 here propagates — guards the loop
+    }
+    throw err;
+  }
 }
 
 function toPersisted(r: DeviceIdentityResponse): PersistedIdentity {
@@ -107,7 +141,7 @@ export function bootstrapIdentity(): Promise<PersistedIdentity> {
   if (bootstrapPromise) return bootstrapPromise;
 
   bootstrapPromise = (async () => {
-    const r = await issue(persistedDeviceId());
+    const r = await issueOrRebootstrap(persistedDeviceId());
     const id = toPersisted(r);
     persist(id);
     return id;
@@ -132,11 +166,16 @@ export function getDeviceId(): string | null {
 }
 
 /**
- * Force a token refresh for the SAME device (used on a 401). Clears the cached
- * token's expiry so the next `bootstrapIdentity` re-issues.
+ * Force a token refresh for the SAME device (used on a 401 from a normal request).
+ *
+ * If the re-issue ITSELF 401s, the device is gone server-side (revoked / wiped DB).
+ * Per spec §8 we then RE-BOOTSTRAP: clear the persisted identity and mint a fresh
+ * device (`deviceId: null`), exactly once. A second 401 (the fresh mint also
+ * rejected) is a hard failure we surface — the one-attempt guard prevents an
+ * infinite re-mint loop.
  */
 export async function refreshToken(): Promise<PersistedIdentity> {
-  const r = await issue(persistedDeviceId());
+  const r = await issueOrRebootstrap(persistedDeviceId());
   const id = toPersisted(r);
   persist(id);
   return id;

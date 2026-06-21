@@ -280,6 +280,118 @@ describe("TrackingClient — backoff → polling fallback", () => {
   });
 });
 
+describe("TrackingClient — transport mode reporting (H1)", () => {
+  it("flips mode to polling when SSE errors, and back to live on reconnect", async () => {
+    FakeEventSource.instances = [];
+    const timers = fakeTimers();
+    const { api } = makeApi({ ...emptySnapshot, latestSeq: 0, events: [] });
+
+    const client = new TrackingClient({
+      api,
+      eventSourceFactory: (url) => new FakeEventSource(url),
+      baseUrl: "http://api.test",
+      getToken: () => "t",
+      backoff: { baseMs: 1, maxMs: 1, maxRetries: 1, pollIntervalMs: 1 },
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    const sub = client.trackOrder("ord_1", () => {});
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+    const modes: string[] = [];
+    sub.onModeChange((m) => modes.push(m));
+
+    // A delivered SSE frame proves the live transport.
+    FakeEventSource.instances[0]!.emit("tracking_event", trackingEvent(1, "packed"));
+    expect(sub.getMode()).toBe("live");
+
+    // Exhaust SSE retries → polling fallback.
+    FakeEventSource.instances[0]!.fail(); // attempt 1 → reconnect scheduled
+    timers.flush();
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(2));
+    FakeEventSource.instances[1]!.fail(); // attempt 2 (> maxRetries=1) → polling
+    await vi.waitFor(() => expect(sub.getMode()).toBe("polling"));
+
+    // While polling the SDK keeps a probe SSE open; a real frame on it recovers.
+    const probe = FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+    probe.emit("tracking_event", trackingEvent(1, "shipped"));
+    await vi.waitFor(() => expect(sub.getMode()).toBe("live"));
+
+    expect(modes).toContain("polling");
+    expect(modes[modes.length - 1]).toBe("live");
+    sub.stop();
+  });
+});
+
+describe("TrackingClient — poll→live seq drift (M1)", () => {
+  it("does NOT drop a real frame at the true next seq after a polling stint", async () => {
+    FakeEventSource.instances = [];
+    const timers = fakeTimers();
+    // Snapshot's authoritative cursor is seq 5 (latestSeq), no replay events.
+    const snapshot: TrackingSnapshot = { ...emptySnapshot, latestSeq: 5, events: [] };
+    const trackingSnapshot = vi.fn(() => Promise.resolve(snapshot));
+    const get = vi.fn(() =>
+      Promise.resolve({
+        id: "ord_1",
+        verticalId: "retail",
+        storefrontId: "sto_1",
+        state: "out_for_delivery",
+        items: [],
+        total: { amount_cents: 0, currency: "USD" },
+        display: {
+          stages: [
+            { key: "out_for_delivery", label: "Out for delivery", reached: true, current: true },
+          ],
+          trackingMode: "timeline" as const,
+        },
+        capabilities: { liveLocation: false },
+        streamUrl: "/v1/orders/ord_1/stream",
+        placedAt: "2026-06-21T12:00:00.000Z",
+      }),
+    );
+    const api = { orders: { trackingSnapshot, get } } as unknown as ApiClient;
+
+    const applied: RealtimeEvent[] = [];
+    const client = new TrackingClient({
+      api,
+      eventSourceFactory: (url) => new FakeEventSource(url),
+      baseUrl: "http://api.test",
+      getToken: () => "t",
+      backoff: { baseMs: 1, maxMs: 1, maxRetries: 1, pollIntervalMs: 1 },
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    const sub = client.trackOrder("ord_1", (e) => applied.push(e));
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+    // Drive into the polling fallback.
+    FakeEventSource.instances[0]!.fail();
+    timers.flush();
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBe(2));
+    FakeEventSource.instances[1]!.fail();
+    await vi.waitFor(() => expect(sub.getMode()).toBe("polling"));
+
+    // Polling emits synthetic frames (≥1). These must NOT advance the SSE cursor.
+    await vi.waitFor(() => expect(applied.length).toBeGreaterThan(0));
+    const beforeRecovery = applied.length;
+    expect(get).toHaveBeenCalled();
+
+    // SSE recovers: a REAL frame at the TRUE next seq (6 = latestSeq+1) arrives on
+    // the probe connection. With the old code the synthetic poll frame had already
+    // claimed seq 6, so this real frame would be dropped as a dup. It must apply.
+    const probe = FakeEventSource.instances[FakeEventSource.instances.length - 1]!;
+    probe.emit("tracking_event", trackingEvent(6, "delivered"));
+    await vi.waitFor(() => expect(trackingSnapshot).toHaveBeenCalledTimes(2)); // re-snapshot
+    await vi.waitFor(() =>
+      expect(
+        applied.some((e) => e.seq === 6 && e.type === "tracking_event" && e.state === "delivered"),
+      ).toBe(true),
+    );
+    expect(applied.length).toBeGreaterThan(beforeRecovery);
+    sub.stop();
+  });
+});
+
 describe("TrackingClient — generation stream reuses the core", () => {
   it("connects to the generation stream and applies images.ready frames", async () => {
     FakeEventSource.instances = [];

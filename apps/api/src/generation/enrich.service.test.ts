@@ -53,6 +53,25 @@ function makeMocks(poll: MediaPollResponse): Mocks {
       }),
     },
     listing: {
+      findUnique: vi.fn((args: { where: { id: string } }) =>
+        // Existing listing carries a placeholder hero (the degrade path keeps it).
+        Promise.resolve({
+          id: args.where.id,
+          status: "generating_media",
+          media: {
+            status: "generating_media",
+            hero: {
+              url: "http://minio:9000/listing-images/placeholder.svg",
+              kind: "image",
+              blurhash: null,
+              aspect_ratio: 1,
+            },
+            alternates: [],
+            expected_ready_ms: 1500,
+            generation_id: `${args.where.id}:gen`,
+          },
+        }),
+      ),
       update: vi.fn((args: unknown) => {
         txCalls.listingUpdates.push(args);
         return Promise.resolve({});
@@ -100,6 +119,37 @@ describe("EnrichService", () => {
     const m = makeMocks({ generation_id: "gen_BATCH", outcome: "generating_media", items: [] });
     const svc = new EnrichService(m.prisma, m.fakeGen, m.storage, m.catalog, m.eventBus);
     await expect(svc.enrich(job)).rejects.toBeInstanceOf(MediaNotReadyError);
+  });
+
+  it("still retries (throws) while generating on a NON-final attempt (M3 happy path)", async () => {
+    const m = makeMocks({ generation_id: "gen_BATCH", outcome: "generating_media", items: [] });
+    const svc = new EnrichService(m.prisma, m.fakeGen, m.storage, m.catalog, m.eventBus);
+    // Attempt 2 of 5 → not exhausted → keep retrying.
+    await expect(svc.enrich(job, { attempt: 2, maxAttempts: 5 })).rejects.toBeInstanceOf(
+      MediaNotReadyError,
+    );
+  });
+
+  it("DEGRADES after the poll budget is exhausted instead of looping forever (M3)", async () => {
+    const m = makeMocks({ generation_id: "gen_BATCH", outcome: "generating_media", items: [] });
+    const svc = new EnrichService(m.prisma, m.fakeGen, m.storage, m.catalog, m.eventBus);
+
+    // Final attempt (5 of 5) still generating → degrade rather than throw.
+    const result = await svc.enrich(job, { attempt: 5, maxAttempts: 5 });
+
+    expect(result).toEqual({ outcome: "degraded", flipped: 1 });
+    // Flipped the listing to degraded while KEEPING its placeholder hero.
+    const update = m.txCalls.listingUpdates[0] as {
+      where: { id: string };
+      data: { status: string; media: { status: string; hero: { url: string } } };
+    };
+    expect(update.where.id).toBe("lst_1");
+    expect(update.data.status).toBe("degraded");
+    expect(update.data.media.status).toBe("degraded");
+    expect(update.data.media.hero.url).toContain("placeholder.svg"); // placeholder kept
+    // Emitted images.degraded (same txn) — the card swaps to a usable degraded state.
+    expect(m.txCalls.outbox).toHaveLength(1);
+    expect((m.txCalls.outbox[0] as { type: string }).type).toBe("images.degraded");
   });
 
   it("on ready: ingests final bytes to MinIO, flips media → ready, emits images.ready", async () => {
