@@ -7,6 +7,7 @@ import { mintId } from "../common/ids";
 import { EventBus } from "../events/event-bus.service";
 import { PrismaService } from "../prisma/prisma.service";
 
+import { type Category } from "./catalog.dto";
 import { toContractListing } from "./listing.mapper";
 
 /** Fields the generation gateway hands the catalog to persist a generated listing. */
@@ -80,7 +81,7 @@ export class CatalogService {
   }
 
   /** Category tree for a storefront (GET /v1/storefronts/{id}/categories). */
-  async listCategories(storefrontId: string): Promise<{ id: string; name: string; slug: string; parentId: string | null }[]> {
+  async listCategories(storefrontId: string): Promise<Category[]> {
     const cats = await this.prisma.category.findMany({
       where: { storefrontId },
       orderBy: { name: "asc" },
@@ -102,8 +103,9 @@ export class CatalogService {
     const status = mediaStatusToListingStatus(input.media.status);
 
     const row = await this.prisma.$transaction(async (tx) => {
+      let written: Awaited<ReturnType<typeof tx.listing.upsert>>;
       if (input.isAnchor) {
-        return tx.listing.upsert({
+        written = await tx.listing.upsert({
           where: {
             storefrontId_canonicalQuery: {
               storefrontId: input.storefrontId,
@@ -134,37 +136,40 @@ export class CatalogService {
             generationId: input.generationId,
           },
         });
+      } else {
+        // Non-anchor filler: a distinct grid card, no dedup key.
+        written = await tx.listing.create({
+          data: {
+            id: mintId("listing"),
+            storefrontId: input.storefrontId,
+            verticalId: input.verticalId,
+            title: input.fields.title,
+            description: input.fields.description,
+            priceCents: input.fields.priceCents,
+            currency: input.fields.currency,
+            attributes: input.fields.attributes as Prisma.InputJsonValue,
+            media: input.media,
+            imageUrls: input.imageUrls,
+            origin: "generated",
+            status,
+            canonicalQuery: null,
+            generationId: input.generationId,
+          },
+        });
       }
 
-      // Non-anchor filler: a distinct grid card, no dedup key.
-      const created = await tx.listing.create({
-        data: {
-          id: mintId("listing"),
-          storefrontId: input.storefrontId,
-          verticalId: input.verticalId,
-          title: input.fields.title,
-          description: input.fields.description,
-          priceCents: input.fields.priceCents,
-          currency: input.fields.currency,
-          attributes: input.fields.attributes as Prisma.InputJsonValue,
-          media: input.media,
-          imageUrls: input.imageUrls,
-          origin: "generated",
-          status,
-          canonicalQuery: null,
-          generationId: input.generationId,
-        },
-      });
-      return created;
-    });
-
-    await this.prisma.$transaction(async (tx) => {
+      // Write the outbox event in the SAME transaction as the listing so the
+      // listing row and its `listing.generated` event commit atomically — no
+      // dual-write window where one lands without the other (mirrors
+      // enrich.service.ts).
       await this.eventBus.publishTx(tx, {
         type: "listing.generated",
-        listingId: row.id,
+        listingId: written.id,
         storefrontId: input.storefrontId,
         canonicalQuery: input.canonicalQuery,
       });
+
+      return written;
     });
 
     return toContractListing(row);

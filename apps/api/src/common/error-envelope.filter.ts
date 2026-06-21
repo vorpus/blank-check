@@ -51,7 +51,10 @@ export class ErrorEnvelopeFilter implements ExceptionFilter {
             : exception.message;
       }
     } else if (exception instanceof Error) {
-      message = exception.message;
+      // Generic, non-domain error → log the real message + stack server-side for
+      // diagnosis, but DO NOT leak it to the client. `message` stays the generic
+      // "internal server error" default so the 500 envelope reveals nothing about
+      // internals (the requestId is the client's correlation handle).
       this.logger.error(`unhandled error: ${exception.message}`, exception.stack);
     }
 

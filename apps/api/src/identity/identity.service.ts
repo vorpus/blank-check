@@ -59,7 +59,9 @@ export class IdentityService {
   /** Verify a bearer token → principal, or throw 401 (used by DeviceAuthGuard). */
   verify(token: string): AuthPrincipal {
     try {
-      const claims = this.jwt.verify<DeviceClaims>(token);
+      // Pin the algorithm so a token can't be coerced to a different scheme
+      // (e.g. an alg-confusion downgrade); Stage 1 signs HS256.
+      const claims = this.jwt.verify<DeviceClaims>(token, { algorithms: ["HS256"] });
       return { userId: claims.sub, deviceId: claims.deviceId, kind: claims.kind };
     } catch {
       throw new UnauthorizedError("invalid or expired bearer token");

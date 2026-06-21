@@ -31,6 +31,12 @@ export const EnvSchema = z.object({
     .transform((v) => v === "true"),
   S3_PUBLIC_BASE_URL: z.string().min(1).default("http://localhost:9000/listing-images"),
 
+  // Image-ingest hardening (SSRF + resource limits). The backend fetches provider
+  // image bytes before PUTting them to MinIO; cap the size and reject non-image
+  // content. Host allowlisting is derived from FAKEGEN_URL (the only provider we
+  // ingest from); MAX_IMAGE_BYTES bounds a single fetched blob.
+  MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024), // 5 MiB
+
   // Identity bearer signing. Stage 1 uses a symmetric secret; Stage 4 swaps the
   // issuer, not the verification plumbing (charter §4.4).
   JWT_SECRET: z.string().min(1).default("dopamine-stage1-dev-secret-not-for-prod"),
@@ -45,6 +51,9 @@ export const EnvSchema = z.object({
   COLD_BATCH: z.coerce.number().int().positive().default(8),
   GEN_LOCK_TTL_MS: z.coerce.number().int().positive().default(30000),
   GEN_MAX_CONCURRENCY: z.coerce.number().int().positive().default(8),
+  // Exact-cache (canon → anchor listingId) TTL. Bounded so a stale/pruned anchor
+  // listing can't be served from the L1 cache forever.
+  EXACT_CACHE_TTL_SEC: z.coerce.number().int().positive().default(3600), // 1h
 });
 
 export type Env = z.infer<typeof EnvSchema>;

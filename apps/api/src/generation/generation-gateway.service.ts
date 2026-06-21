@@ -10,6 +10,7 @@ import { type Queue } from "bullmq";
 import { CatalogService, type GeneratedListingInput } from "../catalog/catalog.service";
 import { mintId } from "../common/ids";
 import { StructuredLogger } from "../common/logger";
+import { requestContext } from "../common/request-context";
 import { ENV } from "../config/config.module";
 import { type Env } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
@@ -149,10 +150,13 @@ export class GenerationGateway {
     }
 
     // Set the exact-cache so the NEXT identical search is an instant L1 hit.
+    // TTL-bounded (EXACT_CACHE_TTL_SEC) so a stale anchor can't live forever.
     if (listingIds.length > 0) {
       await this.redis.client.set(
         this.canon.cacheKey(input.storefrontId, input.canonicalQuery),
         listingIds[0] ?? "",
+        "EX",
+        this.env.EXACT_CACHE_TTL_SEC,
       );
     }
 
@@ -169,6 +173,9 @@ export class GenerationGateway {
 
     await this.enrichQueue.add(QUEUE_NAMES.generationEnrich, {
       jobId: requestId,
+      // Propagate the originating HTTP request id (falls back to the generation id)
+      // so the worker's logs/events correlate back to the search that enqueued it.
+      requestId: requestContext.requestId(),
       generationId: batchGenerationId,
       storefrontId: input.storefrontId,
       verticalId: input.verticalId,

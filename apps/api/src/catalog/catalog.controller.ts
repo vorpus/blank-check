@@ -2,7 +2,7 @@ import { type Listing } from "@dopamine/contracts";
 import { Controller, Get, Param } from "@nestjs/common";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 
-import { ListingResponseDto } from "./catalog.dto";
+import { type Category, CategoryListResponseDto, ListingResponseDto } from "./catalog.dto";
 import { CatalogService } from "./catalog.service";
 
 /**
@@ -23,7 +23,8 @@ export class CatalogController {
 
   @Get("storefronts/:id/categories")
   @ApiOperation({ summary: "List a storefront's category tree" })
-  categories(@Param("id") storefrontId: string) {
+  @ApiOkResponse({ type: CategoryListResponseDto })
+  categories(@Param("id") storefrontId: string): Promise<Category[]> {
     return this.catalog.listCategories(storefrontId);
   }
 }

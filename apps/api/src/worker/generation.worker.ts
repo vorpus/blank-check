@@ -29,7 +29,10 @@ export class GenerationWorker implements OnModuleDestroy {
     this.worker = new Worker<GenerationEnrichJob>(
       QUEUE_NAMES.generationEnrich,
       (job: Job<GenerationEnrichJob>) =>
-        requestContext.run({ requestId: `enrich:${job.data.generationId}` }, async () => {
+        // Seed the worker's request context from the propagated requestId so its
+        // logs/events correlate with the originating search (fall back to a
+        // generation-scoped id for older jobs enqueued before requestId existed).
+        requestContext.run({ requestId: job.data.requestId ?? `enrich:${job.data.generationId}` }, async () => {
           const result = await this.enrich.enrich(job.data);
           return result;
         }),

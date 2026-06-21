@@ -126,6 +126,9 @@ export class OutboxRelay implements OnModuleDestroy {
       case "order.transition": {
         // Seam for 3b: the tracking event projection lands with the orders module.
         // We still publish a thin notification so the 3b gateway has a channel.
+        // TODO(3b): map the order event onto the public TrackingEventSchema wire
+        // shape (like images.ready/degraded above) instead of publishing the raw
+        // internal DomainEvent JSON.
         await this.redis.client.publish(orderChannel(event.orderId), JSON.stringify(event));
         return;
       }
@@ -138,6 +141,9 @@ export class OutboxRelay implements OnModuleDestroy {
 
   /** Per-generation monotonic seq for the realtime event contract (charter §4.3). */
   private async nextSeq(generationId: string): Promise<number> {
+    // TODO(3b): for ORDER tracking events, derive `seq` from the tracking_events
+    // PK (a durable, gap-free per-order sequence) rather than this Redis counter,
+    // which resets if Redis is flushed and isn't tied to the persisted projection.
     return this.redis.client.incr(`seq:gen:${generationId}`);
   }
 }

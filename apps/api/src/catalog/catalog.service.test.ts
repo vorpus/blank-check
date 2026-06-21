@@ -49,8 +49,14 @@ function makeMocks(persistedRow: Record<string, unknown>) {
   const prisma = {
     $transaction: vi.fn((fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
   } as unknown as PrismaService;
-  const eventBus = { publishTx: vi.fn().mockResolvedValue(undefined) } as unknown as EventBus;
-  return { prisma, eventBus, calls };
+  const publishTxCalls: { tx: unknown; event: unknown }[] = [];
+  const eventBus = {
+    publishTx: vi.fn((t: unknown, event: unknown) => {
+      publishTxCalls.push({ tx: t, event });
+      return Promise.resolve(undefined);
+    }),
+  } as unknown as EventBus;
+  return { prisma, eventBus, calls, tx, publishTxCalls };
 }
 
 const persistedRow = {
@@ -90,7 +96,20 @@ describe("CatalogService.writeBackGenerated", () => {
     expect(m.calls.upsert).toHaveLength(1);
     const upsert = m.calls.upsert[0] as { where: { storefrontId_canonicalQuery: { storefrontId: string; canonicalQuery: string } } };
     expect(upsert.where.storefrontId_canonicalQuery).toEqual({ storefrontId: "sto_1", canonicalQuery: "ladder" });
-    expect(m.eventBus.publishTx).toHaveBeenCalled();
+
+    // The outbox event must be published on the SAME tx as the listing write so
+    // they commit atomically (no dual-write window). Exactly one publishTx call,
+    // carrying the same transaction client the listing was written on.
+    expect(m.publishTxCalls).toHaveLength(1);
+    expect(m.publishTxCalls[0]?.tx).toBe(m.tx);
+    expect(m.publishTxCalls[0]?.event).toMatchObject({
+      type: "listing.generated",
+      listingId: "lst_1",
+      storefrontId: "sto_1",
+      canonicalQuery: "ladder",
+    });
+    // Single $transaction → listing + outbox row share one commit.
+    expect((m.prisma.$transaction as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1);
   });
 
   it("filler → creates a distinct row with a null canonicalQuery (no unique clash)", async () => {

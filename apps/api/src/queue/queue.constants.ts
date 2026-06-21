@@ -18,6 +18,12 @@ export const GENERATION_ENRICH_QUEUE = Symbol("GENERATION_ENRICH_QUEUE");
 export interface GenerationEnrichJob {
   /** generation_jobs.id — links the job back to its persisted record. */
   jobId: string;
+  /**
+   * The originating request's id, propagated across the api→worker boundary so the
+   * worker's logs/events correlate with the search that triggered them (instead of
+   * an opaque `enrich:<genId>`).
+   */
+  requestId: string;
   /** fake-gen batch generation id — what the worker polls `GET /media/:id` with. */
   generationId: string;
   storefrontId: string;

@@ -87,6 +87,7 @@ function makeMocks(poll: MediaPollResponse): Mocks {
 
 const job: GenerationEnrichJob = {
   jobId: "req_1",
+  requestId: "req_http_1",
   generationId: "gen_BATCH",
   storefrontId: "sto_1",
   verticalId: "retail",

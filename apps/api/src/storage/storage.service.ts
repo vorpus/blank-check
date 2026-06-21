@@ -39,10 +39,18 @@ export class StorageService {
   private readonly s3: S3Client;
   private readonly bucket: string;
   private readonly publicBaseUrl: string;
+  /** Hosts we're allowed to fetch image bytes from (SSRF guard). */
+  private readonly allowedHosts: ReadonlySet<string>;
+  private readonly maxImageBytes: number;
 
   constructor(@Inject(ENV) env: Env) {
     this.bucket = env.S3_BUCKET;
     this.publicBaseUrl = env.S3_PUBLIC_BASE_URL.replace(/\/$/, "");
+    this.maxImageBytes = env.MAX_IMAGE_BYTES;
+    // Only fake-gen serves provider image bytes; derive the allowlist from its
+    // configured URL so a malicious/poisoned provider url can't pivot us into an
+    // internal-network fetch (SSRF).
+    this.allowedHosts = new Set([new URL(env.FAKEGEN_URL).host]);
     this.s3 = new S3Client({
       endpoint: env.S3_ENDPOINT,
       region: env.S3_REGION,
@@ -62,15 +70,90 @@ export class StorageService {
     return `gen/${digest.slice(0, 2)}/${digest}${ext}`;
   }
 
-  /** Fetch bytes from a provider URL (fake-gen `/img/...`). */
+  /**
+   * Fetch bytes from a provider URL (fake-gen `/img/...`), hardened against SSRF +
+   * resource abuse before anything is written to MinIO:
+   *   (a) the URL host must be in the FAKEGEN_URL-derived allowlist;
+   *   (b) the response Content-Type must be an image;
+   *   (c) the body must not exceed MAX_IMAGE_BYTES (checked against the
+   *       Content-Length header up front, then enforced while streaming since a
+   *       header can lie or be absent).
+   */
   async fetchBytes(url: string): Promise<IngestInput> {
+    this.assertAllowedHost(url);
+
     const res = await fetch(url);
     if (!res.ok) {
       throw new Error(`failed to fetch image bytes from ${url}: HTTP ${String(res.status)}`);
     }
+
     const contentType = res.headers.get("content-type") ?? "application/octet-stream";
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!isImageContentType(contentType)) {
+      throw new Error(`refusing non-image content-type "${contentType}" from ${url}`);
+    }
+
+    const declared = res.headers.get("content-length");
+    if (declared !== null && Number(declared) > this.maxImageBytes) {
+      throw new Error(
+        `image from ${url} exceeds max size (${declared} > ${String(this.maxImageBytes)} bytes)`,
+      );
+    }
+
+    const bytes = await this.readCapped(res, url);
     return { bytes, contentType, sourceKey: url };
+  }
+
+  private assertAllowedHost(url: string): void {
+    let host: string;
+    try {
+      host = new URL(url).host;
+    } catch {
+      throw new Error(`invalid image url: ${url}`);
+    }
+    if (!this.allowedHosts.has(host)) {
+      throw new Error(`refusing to fetch image from disallowed host: ${host}`);
+    }
+  }
+
+  /** Read the body, aborting once it would exceed the cap (defends a lying/absent Content-Length). */
+  private async readCapped(res: Response, url: string): Promise<Uint8Array> {
+    const body: ReadableStream<Uint8Array> | null = res.body;
+    const reader = body?.getReader();
+    if (!reader) {
+      // No stream available (e.g. a mocked Response) — fall back to the buffered
+      // read but still enforce the cap on the materialized bytes.
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.length > this.maxImageBytes) {
+        throw new Error(
+          `image from ${url} exceeds max size (${String(bytes.length)} > ${String(this.maxImageBytes)} bytes)`,
+        );
+      }
+      return bytes;
+    }
+
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.length;
+      if (total > this.maxImageBytes) {
+        await reader.cancel();
+        throw new Error(
+          `image from ${url} exceeds max size (> ${String(this.maxImageBytes)} bytes)`,
+        );
+      }
+      chunks.push(value);
+    }
+
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
   }
 
   /** Idempotent PUT — skips the upload if the content-addressed key already exists. */
@@ -107,6 +190,11 @@ export class StorageService {
       return false;
     }
   }
+}
+
+/** True for `image/*` content types (SVG included — fake-gen serves SVG heroes). */
+function isImageContentType(contentType: string): boolean {
+  return /^image\//i.test(contentType.split(";")[0]?.trim() ?? "");
 }
 
 function extensionFor(contentType: string): string {

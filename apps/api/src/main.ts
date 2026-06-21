@@ -22,6 +22,26 @@ async function bootstrap(): Promise<void> {
   const port = Number(process.env.PORT ?? 8080);
   await app.listen({ port, host: "0.0.0.0" });
   logger.log(`api listening on :${String(port)} (docs at /v1/docs)`);
+
+  // Graceful shutdown (mirrors the worker): on SIGTERM/SIGINT close the Nest app,
+  // which runs every provider's onModuleDestroy — stopping the OutboxRelay timer
+  // and closing the producer-side BullMQ Queue's Redis connection — before exit.
+  let closing = false;
+  const shutdown = (signal: string): void => {
+    if (closing) return;
+    closing = true;
+    logger.log(`api shutting down (${signal})`);
+    void app
+      .close()
+      .then(() => process.exit(0))
+      .catch((err: unknown) => {
+
+        console.error("api shutdown failed:", err);
+        process.exit(1);
+      });
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 void bootstrap().catch((err: unknown) => {
