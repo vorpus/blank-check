@@ -120,3 +120,15 @@ export {
 
 // Tracking snapshot (doc 05 §5.1 — ADDITIVE, Milestone 3b)
 export { TrackingSnapshotSchema, type TrackingSnapshot } from "./tracking.js";
+
+// Cart (doc 01 §7 / doc 05 §5 — PROMOTED, Milestone 4a)
+export {
+  CartItemSchema,
+  CartSchema,
+  AddCartItemSchema,
+  UpdateCartItemSchema,
+  type CartItem,
+  type Cart,
+  type AddCartItem,
+  type UpdateCartItem,
+} from "./cart.js";

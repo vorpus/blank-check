@@ -76,8 +76,28 @@ build:
 
 ## sdk: regenerate the typed SDK from the /v1 OpenAPI spec (doc 05 3.2)
 sdk:
-	pnpm --filter "@dopamine/sdk" generate
+	# 1. dump the spec from the NestJS app (pure schema build — no DB needed),
+	#    committing the reviewable artifact into the SDK package. The path is
+	#    absolute because `pnpm --filter` runs the script with the api dir as CWD.
+	pnpm --filter "@dopamine/api" run openapi:dump "$(CURDIR)/packages/sdk/openapi/v1.json"
+	# 2. generate transport types from the committed spec (paths are package-relative
+	#    inside the SDK's own `openapi:gen` script: ./openapi/v1.json → ./src/openapi.gen.ts).
+	pnpm --filter "@dopamine/sdk" run openapi:gen
+	# 3. typecheck the SDK against the freshly generated types.
+	pnpm --filter "@dopamine/sdk" run typecheck
 	@echo "SDK regenerated from /v1 OpenAPI spec"
+
+## sdk-check: drift gate — regenerate into a temp dir, fail if anything differs
+sdk-check:
+	@tmp=$$(mktemp -d); \
+	pnpm --filter "@dopamine/api" run openapi:dump "$$tmp/v1.json" >/dev/null 2>&1; \
+	pnpm --filter "@dopamine/sdk" exec openapi-typescript "$$tmp/v1.json" -o "$$tmp/openapi.gen.ts" >/dev/null 2>&1; \
+	ok=1; \
+	diff -u packages/sdk/openapi/v1.json "$$tmp/v1.json" || ok=0; \
+	diff -u packages/sdk/src/openapi.gen.ts "$$tmp/openapi.gen.ts" || ok=0; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "SDK drift gate: clean (spec + generated types up to date)"; \
+	else echo "ERROR: SDK is out of date — run 'make sdk' and commit the result."; exit 1; fi
 
 ## psql: open a psql shell in the postgres container
 psql:

@@ -1,0 +1,14 @@
+{
+  "extends": "@dopamine/config/tsconfig.lib.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    // The SDK targets the Fetch + WHATWG-URL globals (`fetch`, `Response`,
+    // `Headers`, `URL`, `URLSearchParams`) that exist in BOTH the browser and
+    // Node 18+/React-Native runtimes the client runs in. `DOM` supplies their
+    // lib types without pulling in a runtime dependency — the SDK never touches
+    // the DOM at runtime (EventSource is injected via our own interface).
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*.ts", "*.config.ts"],
+  "exclude": ["node_modules", "dist", ".turbo", "coverage"]
+}
