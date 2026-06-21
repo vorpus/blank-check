@@ -110,7 +110,7 @@ explicit state so the client never has to guess.
 ```jsonc
 // listing.media — present on every listing the client receives
 {
-  "status": "generating_media",        // "generating_media" | "ready" | "degraded"
+  "status": "generating_media",        // "generating_text" | "generating_media" | "ready" | "degraded"
   "hero": {
     "url": "https://cdn/.../placeholder.webp",
     "kind": "placeholder",             // "placeholder" | "final"
@@ -141,6 +141,49 @@ explicit state so the client never has to guess.
 > **Alignment needed (real-time team):** the `images_ready` push uses the same WS/SSE fan-out the
 > order-tracking feature uses. Payload is thin (`{generation_id, listing_id, media}`) — client
 > re-reads `media` and swaps. See §8 for the event contract.
+
+#### Live token streaming on first generation (the COLD path)
+
+The rules above describe **reuse/cache** results, where text is final instantly.
+But the *first time* an item is generated (the COLD regime, §4.7) is the magic
+moment, and we lean into it: **stream the model's tokens to the client so the user
+watches the listing being written**, with a spinner over the image while it
+renders. This turns unavoidable latency into delight instead of a blank wait.
+
+How it works: the fast-path Claude call is a **streaming** request
+(`messages.create` with `stream: true`). The API holds an SSE/WS channel keyed on
+`generation_id` and relays text deltas straight through to the client. Because the
+output is a structured object (§2.2), we stream **field-by-field** — title first,
+then description tokens, then specs — so the client can render a real,
+progressively-filling card rather than raw JSON.
+
+```jsonc
+// generation events on channel gen:{generation_id} (in order)
+{ "type": "gen.start",        "listing_id": "lst_…", "fields": ["title","description","specs"] }
+{ "type": "gen.delta",        "field": "title",       "text": "Heavy-Duty Aluminum " }
+{ "type": "gen.field_done",   "field": "title" }
+{ "type": "gen.delta",        "field": "description", "text": "Reach new heights with…" }
+{ "type": "gen.field_done",   "field": "description" }
+{ "type": "gen.text_done",    "listing": { /* finalized listing text */ } }
+{ "type": "gen.images_ready", "media": { /* heroes swapped in */ } }   // later, async
+```
+
+**Client rules (additive to the five above):**
+
+6. **Stream-render text** when a card carries `media.status == "generating_text"`:
+   append `gen.delta` text into the right field; show a caret/typing cursor. Treat
+   `gen.text_done` as the final value (don't trust partial deltas for ordering/price).
+7. **Spinner over the image** for the whole text-stream phase (no image exists
+   yet), then follow rule 2/3 once a placeholder and later final image arrive.
+8. **Multi-listing grids stream the first card** (the focused one) live; the rest
+   of the batch fill in as `gen.text_done` lands for each, so the grid visibly
+   *populates* (very Amazon-on-fast-forward). Cap concurrent live streams to 1–2;
+   the rest pop in finalized.
+
+So the contract has **three** media states, in escalating richness:
+`generating_text` (tokens streaming, image spinner) → `generating_media` (text
+final, placeholder image + "enhancing" shimmer) → `ready` (final images). Reuse
+hits skip straight to `ready`.
 
 ---
 
@@ -418,6 +461,83 @@ dedup correct under concurrency and is essential for cost control.
 | L2 Semantic | pgvector (HNSW) | query embedding | ~5–30 ms | Meaning-level dedup |
 | L3 Listing | Postgres | `listing_id` | ~ms | Source of truth |
 | Prompt cache | Anthropic | system-prompt prefix | n/a | Cuts text-gen input cost ~90% |
+
+### 4.7 Search resolution policy — blended cache vs. generate
+
+§4.1–4.6 decide *"does this one query map to an existing listing?"*. This section
+decides the richer question the product actually asks on every search: **"how
+many results do I show, how many come from cache, and how many do I generate so
+the page looks like a populated store?"** A search-results page should look like
+Amazon — a scrollable grid of many products — not a single listing.
+
+Three inputs drive the decision, computed cheaply at search time:
+
+| Signal | Source | Meaning |
+|---|---|---|
+| `s_max` | top pgvector cosine score | how good is the *best* existing match |
+| `matchCount` | # listings above a relevance floor | how much inventory already exists |
+| `popularity` | Redis counter on `canon_key` (decaying) | how common/repeated this search is |
+
+We classify the query into one of three regimes and blend accordingly. Let
+`gridTarget` = the number of cards that fill a results page (e.g. **24**).
+
+| Regime | Condition (tunable) | What we return | What we generate |
+|---|---|---|---|
+| **🔥 Hot / common** | `matchCount ≥ gridTarget` **or** `popularity` high | **All from cache** — full grid, instant. No LLM call. | Nothing (optional lazy background top-up if inventory is stale) |
+| **🌤 Warm / partial** | `1 ≤ matchCount < gridTarget` and `s_max ≥ 0.75` | The `matchCount` cached listings **immediately** | Kick off a batch to generate `gridTarget − matchCount` *new, distinct* listings that stream into the grid (§ multi-listing below) |
+| **❄️ Cold / novel** | `matchCount == 0` **or** `s_max < reuse/related floor` | A few **loosely-related** cached items as instant filler — **relax the similarity bar** here (accept down to e.g. `s_max ≥ 0.55`) precisely *because* nothing better exists | Generate a fresh batch of `K` (e.g. 8–24) distinct listings; **stream the first one live** (§1.4) |
+
+Key heuristic, in the user's words: **the more novel/unique the search, the lower
+the match "heat" we'll accept** for showing existing items as filler (better to
+show *something* loosely related than an empty page while we generate); **the more
+common the search, the more we serve purely from cache** (it's cheap, instant, and
+already good). The warm middle does both — return some, generate some.
+
+```
+score the query ──► s_max, matchCount, popularity
+        │
+        ├─ matchCount ≥ gridTarget OR popularity hot ──► HOT: return cache grid, generate 0
+        │
+        ├─ 1 ≤ matchCount < gridTarget AND s_max ≥ 0.75 ─► WARM: return matches now,
+        │                                                   generate (gridTarget − matchCount)
+        │
+        └─ else ─────────────────────────────────────────► COLD: return loose filler
+                                                            (relaxed s_max floor),
+                                                            generate K, stream first live
+```
+
+**Anti-abuse interaction:** the COLD path is the expensive one (a batch
+generation). It is gated by the per-user / global generation budget and the
+`canon_key` lock (§4.5, §5) so a flood of unique nonsense queries can't run up the
+bill — beyond a budget threshold, COLD degrades to "show loose filler + generate
+just **one** item" instead of a full batch.
+
+**Why this is cheap to compute:** all three signals come from work we already do
+(the ANN search returns `s_max` and `matchCount` for free) plus one Redis
+`INCR`/read for `popularity`. The regime thresholds are config, tuned from logged
+outcomes (§6.3), and can differ per vertical via the strategy in §7.
+
+#### Multi-listing generation (filling the grid)
+
+When a regime calls for N new listings, we don't make N independent "ladder"
+calls that return N identical ladders. One Claude call produces a **set of N
+distinct variants** — different brands, materials, price points, feature mixes —
+in a single structured response (an array of the §2.2 schema). This is both
+cheaper (one prompt, shared cached system prefix) and gives intentional variety
+that *looks* like a real catalog.
+
+- **Distinctness** is instructed in the prompt ("generate N *different* products a
+  store would stock for this query, varying brand/price/material/use-case") and
+  enforced by de-duping their embeddings before persist.
+- **Cost scales with N**, so N is bounded by regime + budget (e.g. COLD batch = 8,
+  WARM top-up = whatever fills the grid, capped). See §5 — multi-listing is the
+  biggest single lever on generation spend, so the grid target and batch sizes are
+  budget-governed config, not constants.
+- Each generated listing still flows through the normal persist path (§4.4) with
+  its own `canonical_query`/alias so future searches hit them directly.
+- **Images:** only the **visible-on-first-screen** heroes get the fast-path
+  placeholder; off-screen cards lazy-trigger enrichment as they scroll into view,
+  so we never pay for images nobody sees.
 
 ---
 

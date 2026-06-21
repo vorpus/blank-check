@@ -210,8 +210,15 @@ Order and listing payloads carry presentation as **data**, not code:
 - AI → backend: `GenerationResult { listing fields, imagePrompts[], embedding?, safetyVerdict }`
 - The AI track implements a `GenerationProvider`; the **backend** owns dedup,
   queueing, idempotency, image ingestion to R2, indexing, and rate limiting.
-- **Client-facing generation states:** `pending → partial → ready → failed`
-  (text can be `ready` before images arrive → progressive image load in UI).
+- **Client-facing generation states:** `generating_text → generating_media → ready`
+  (`failed`/`degraded` are terminal-but-usable). First-time (COLD) searches **stream
+  Claude tokens live** (the listing visibly types out) with an image spinner; reuse
+  hits skip straight to `ready`. See doc 02 §1.4.
+- **Search returns a populated grid, not one result.** A blended cache-vs-generate
+  policy (doc 02 §4.7) decides per search how many listings come from cache vs are
+  generated as a batch, so results scroll like a real store. Three regimes —
+  hot (all cache) / warm (some of each) / cold (relax match bar for filler +
+  generate a batch).
 
 ### 4.3 Real-time event contract (realtime ↔ clients) — _doc 04 §5_
 Two channel families per order:

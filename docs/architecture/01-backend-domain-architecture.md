@@ -365,6 +365,17 @@ The write-back happens in **one Postgres transaction**: insert the `listing` row
 | Object storage | **S3 / Cloudflare R2** + CDN | Generated images are blobs; never store in Postgres. R2 has no egress fees — attractive for image-heavy media. Serve via CDN. |
 | Cache / ephemeral / queue / pub-sub | **Redis** | Hot listing cache, rate-limit counters, BullMQ backend, and SSE fan-out (pub/sub) so multiple API instances can push to a subscriber. |
 
+> **"Can Postgres find a previously-created item by full name, or do I need Elastic?"**
+> **Postgres, comfortably — you do not need Elasticsearch to launch.** For
+> finding an existing item by name you have three complementary tools in one
+> engine: (1) an exact/normalized lookup on `canonical_query` (B-tree, sub-ms) for
+> "same search again"; (2) **`pg_trgm`** trigram index for fuzzy/typo and
+> partial-name matches; (3) **`tsvector` FTS** for word-level full-text. Add
+> `pgvector` for meaning-level matches. That covers exact, fuzzy, full-text, and
+> semantic — all joinable with relational filters in a single query. A dedicated
+> engine (below) only earns its keep at large catalog size or when you need
+> out-of-the-box faceting, BM25 tuning, and best-in-class typo tolerance.
+
 ### 5.2 When to graduate to a dedicated search engine
 
 If catalog grows large or we need typo-tolerance, faceting, and hybrid ranking out of the box, introduce **Typesense** (simplest ops) or **OpenSearch** (richest) as a read-side index fed by the `listing.generated`/`listing.updated` events. Because indexing is already event-driven via the outbox, this is additive. **Do not start here** — it's premature for a toy at launch and doubles operational surface.
