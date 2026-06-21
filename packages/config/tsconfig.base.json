@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "@dopamine/config base",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    // `Bundler` resolution is the best authoring experience for our consumers:
+    // Next.js (App Router) and Vite/Vitest both resolve with bundler semantics,
+    // and NestJS (ts-node / SWC) is happy importing the package's emitted JS.
+    // `@dopamine/contracts` ships dual ESM+CJS + .d.ts via tsup, so the *published*
+    // artifact resolves correctly under NodeNext consumers too — see contracts/tsup.config.
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+
+    // TS 6.0 errors on `baseUrl` (which tsup injects for its DTS build) unless we
+    // explicitly opt into the legacy behavior. Silences the 6.0 deprecation gate.
+    "ignoreDeprecations": "6.0",
+
+    // strictness
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "forceConsistentCasingInFileNames": true,
+
+    // interop / ergonomics
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "exclude": ["node_modules", "dist", ".turbo", "coverage"]
+}

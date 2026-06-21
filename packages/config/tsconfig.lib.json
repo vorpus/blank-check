@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "@dopamine/config library",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Libraries emit declarations; the JS itself is produced by the package's
+    // bundler (tsup). Use this config for `typecheck` (noEmit) — see each
+    // package's tsconfig which sets rootDir/outDir as needed.
+    "composite": false,
+    "noEmit": true
+  }
+}
