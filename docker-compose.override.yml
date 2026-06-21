@@ -1,0 +1,81 @@
+# Dev hot-reload overlay -- auto-merged by `docker compose` on top of
+# docker-compose.yml. This is the DEFAULT local path (`make up`).
+#
+# Datastores (postgres/redis/minio) are inherited unchanged from the base file,
+# so your seeded data survives while you iterate on app code. Only the app
+# services are swapped to a watch-mode command with bind-mounted source.
+#
+# For a prod-parity run that IGNORES this overlay (what CI / Stage 05 build):
+#   docker compose -f docker-compose.yml up
+#
+# The anonymous `node_modules` volumes stop the host bind mount from shadowing
+# the container's installed deps. Source + workspace packages are mounted so an
+# edit on the host triggers the in-container watcher.
+
+# YAML anchors do NOT cross files -- each compose file is parsed independently.
+# So we re-declare the shared backend env anchor here (kept identical to the
+# base docker-compose.yml). The base service's `environment:` is still merged
+# by compose; this block adds the dev-only NODE_ENV override on top.
+x-app-env: &app-env
+  DATABASE_URL: postgresql://app:app@postgres:5432/dopamine?schema=public
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: http://minio:9000
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-listing-images}
+  S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  S3_FORCE_PATH_STYLE: "true"
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-http://localhost:9000/listing-images}
+  FAKEGEN_URL: http://fake-gen:8090
+
+services:
+  api:
+    build:
+      target: deps                         # run TS source directly, no prod build
+    command: ["pnpm", "--filter", "@dopamine/api", "dev"]   # nest start --watch
+    environment:
+      <<: *app-env
+      NODE_ENV: development
+      PORT: "8080"
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+    volumes:
+      - ./apps/api:/repo/apps/api
+      - ./packages:/repo/packages
+      - /repo/apps/api/node_modules        # keep container deps
+
+  worker:
+    build:
+      target: deps
+    command: ["pnpm", "--filter", "@dopamine/api", "dev:worker"]
+    environment:
+      <<: *app-env
+      NODE_ENV: development
+    volumes:
+      - ./apps/api:/repo/apps/api
+      - ./packages:/repo/packages
+      - /repo/apps/api/node_modules
+
+  fake-gen:
+    build:
+      target: build
+    command: ["pnpm", "--filter", "@dopamine/fake-gen", "dev"]
+    environment:
+      <<: *app-env
+      NODE_ENV: development
+      PORT: "8090"
+    volumes:
+      - ./apps/fake-gen:/repo/apps/fake-gen
+      - ./packages:/repo/packages
+      - /repo/apps/fake-gen/node_modules
+
+  web:
+    build:
+      target: build
+    command: ["pnpm", "--filter", "@dopamine/web", "dev"]   # next dev
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    volumes:
+      - ./apps/web:/repo/apps/web
+      - ./packages:/repo/packages
+      - /repo/apps/web/node_modules

@@ -1,0 +1,9 @@
+{
+  "extends": "@dopamine/config/tsconfig.lib.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "*.config.ts"],
+  "exclude": ["node_modules", "dist", ".turbo", "coverage"]
+}

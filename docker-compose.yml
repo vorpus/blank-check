@@ -1,0 +1,238 @@
+# Dopamine -- Stage 1 local stack (production-shaped, built images).
+#
+# The dev hot-reload overlay is docker-compose.override.yml (auto-merged by
+# `docker compose`). For a prod-parity run that ignores it:
+#   docker compose -f docker-compose.yml up
+#
+# `make up` builds, brings the stack up, and blocks on --wait until every
+# healthcheck is green. migrate + seed run as ordered one-shots inside the
+# bring-up (see depends_on below), so `make up` alone is the cold start.
+name: dopamine
+
+# ---- shared backend env (api, worker, migrate, seed) -----------------------
+# One anchor, merged with <<: into each service so the wiring stays DRY.
+# Values resolve from .env (created from .env.example) with safe inline
+# fallbacks so the stack runs even with no .env present.
+x-app-env: &app-env
+  DATABASE_URL: postgresql://app:app@postgres:5432/dopamine?schema=public
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: http://minio:9000
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-listing-images}
+  S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  S3_FORCE_PATH_STYLE: "true"          # MinIO needs path-style; R2 too
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-http://localhost:9000/listing-images}
+  FAKEGEN_URL: http://fake-gen:8090
+  NODE_ENV: production
+
+# Anchor for the shared api image build, reused by api/worker/migrate/seed so
+# they share ONE image (built once, distinguished only by `command`).
+x-api-build: &api-build
+  context: .
+  dockerfile: apps/api/Dockerfile
+
+services:
+  # ======================== datastores ====================================
+  postgres:
+    image: postgres:16.4-bookworm          # plain -- pgvector is Stage 02
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: dopamine
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # FTS / pg_trgm bootstrap -- runs once on first volume init.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d dopamine"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [backend]
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]   # durable queue state
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks: [backend]
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"     # S3 API
+      - "9001:9001"     # web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [backend]
+
+  # ======================== one-shot bootstraps ===========================
+  minio-init:                              # create bucket + public-read, exit 0
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-listing-images}
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    volumes:
+      - ./infra/minio/bootstrap.sh:/bootstrap.sh:ro
+    restart: "no"
+    networks: [backend]
+
+  migrate:                                 # prisma migrate deploy, exit 0
+    image: dopamine-api
+    build: *api-build
+    command: ["migrate"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+
+  seed:                                    # load starter retail catalog, exit 0
+    image: dopamine-api                    # reuse the api image (no rebuild)
+    command: ["seed"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    restart: "no"
+    networks: [backend]
+
+  # ======================== application services ==========================
+  api:
+    image: dopamine-api
+    build: *api-build
+    command: ["api"]
+    environment:
+      <<: *app-env
+      PORT: "8080"
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:8080/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+  worker:                                  # same image, BullMQ entrypoint
+    image: dopamine-api
+    command: ["worker"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # No HTTP port: liveness placeholder. Swap for a real /healthz probe once
+    # 01-backend-api.md exposes one on the worker (recommended).
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    networks: [backend]
+
+  fake-gen:                                # Dockerfile owned by 02-fake-generation.md
+    image: dopamine-fake-gen
+    build:
+      context: .
+      dockerfile: apps/fake-gen/Dockerfile
+    environment:
+      <<: *app-env                         # S3_* for placeholder image writes
+      PORT: "8090"
+    ports: ["8090:8090"]
+    # Per charter 5.5.2: fake-gen needs NO datastore deps -- only the bucket,
+    # because it writes placeholder images to MinIO via the S3 API.
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:8090/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks: [backend]
+
+  web:
+    image: dopamine-web
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      # NEXT_PUBLIC_* is baked for the BROWSER, which resolves against the host
+      # (not the compose network) -> the host-published api port.
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    ports: ["3000:3000"]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+
+networks:
+  backend:
+    driver: bridge

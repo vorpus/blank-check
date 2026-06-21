@@ -219,6 +219,40 @@ seam — implement to these:
    live in the **backend**; `fake-gen` returns `origin: "generated"` content only
    (cache/seed/reuse hits mean the backend never calls it).
 
+6. **`fake-gen` HTTP contract (as built — the api/worker integrate against THIS,
+   not doc 01/02 prose).** The canonical `@dopamine/contracts` schemas won over
+   the docs' illustrative JSON wherever they differed. Concretely:
+   - `POST /generate` → a single `GenerationResult` (`listing_id: null`,
+     `origin: "generated"`, `status: "generating_media"`, `listing` with a
+     placeholder hero whose `MediaAsset.url` is a **fetchable** `fake-gen` URL
+     `http://fake-gen:8090/img/ph/<key>.svg`).
+   - `POST /generate-grid` → an **envelope** `{ generation_id, origin, status,
+     results: GenerationResult[] }` (the array rides the envelope; each element
+     is a contract `GenerationResult`). The api's generation-gateway adapter maps
+     this HTTP envelope onto the `GenerationProvider.generateGrid` interface
+     (`Promise<GenerationResult[]>`).
+   - `GET /media/:generationId` → the **worker's** async-readiness poll
+     (worker-driven, not webhook): `generating_media` until the fake enrichment
+     delay elapses, then `ready` with final `…/img/fin/<key>.svg` heroes. The
+     worker GETs those URLs and **ingests the bytes to MinIO** (fake-gen never
+     writes MinIO). `<key>` is content-addressed so MinIO writes are idempotent.
+   - `generation_id` granularity: one **batch** id per request (deterministic
+     from `requestId|vertical|query`); each variant also carries a per-listing
+     `<batch>:g<n>` in its `media.generation_id`. The worker polls the **batch**
+     id and receives all items.
+   - Price is `Money` (`{ amount_cents, currency }`); `category`, `bullet_specs`,
+     and spec facets ride in the listing's open `attributes` JSONB (no
+     `amount_min/max`, `image_prompts`, or `client_ref` top-level fields exist).
+   - Env knobs on `fake-gen`: text latency, image-enrichment delay, forced-degraded
+     rate, grid size — for demoing skeleton→placeholder→ready and the degraded path.
+
+7. **The `worker` exposes a tiny `/healthz`** so its container healthcheck is a
+   real readiness probe (can it reach Redis/BullMQ), not a liveness placeholder.
+
+8. **Zod v4** is in use across the workspace — downstream code uses v4 idioms
+   (`z.url()`, `z.iso.datetime()`, `z.record(z.string(), z.unknown())`); identical
+   wire shapes to the v3 snippets in the docs.
+
 ---
 
 ## 6. Stage exit criteria (the acceptance demo)
