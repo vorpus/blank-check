@@ -1,6 +1,9 @@
 # Stage 01 — Local Walking Skeleton
 
-> **Status:** Active — current build target.
+> **Status:** ✅ **BUILT** — `docker compose` cold-start + the §6 acceptance demo
+> (`make e2e`, 13 assertions across all 5 criteria) pass; 136 unit tests. Built
+> across milestones M1–M5 (see repo `git log`), each verified and committed, with
+> two production-review→fix loops folded in.
 > **Goal:** the entire retail product loop, running as Dockerized containers on a
 > developer laptop, end-to-end, with **fake** AI generation and **no accounts** —
 > a simple but complete web app that lets us *define the features and lock the

@@ -97,5 +97,21 @@ with its own engineering implementation docs.
 
 | Stage | Charter | Impl docs | Status |
 |---|---|---|---|
-| 01 | ✅ | ✅ (team-authored) | **active — current build target** |
+| 01 | ✅ | ✅ (team-authored) | **✅ BUILT — `docker compose` cold-start + acceptance demo (`make e2e`, 13 assertions) pass; 136 tests** |
 | 02–08 | ✅ | ⏳ written when active | planned |
+
+### Stage 01 — built artifacts
+
+A pnpm/Turborepo monorepo implementing the full local skeleton. `make up && make
+seed` cold-starts the whole stack (~20s) and `make e2e` proves the charter §6
+acceptance demo.
+
+```
+packages/  contracts (Zod wire contracts) · sdk (typed ApiClient + TrackingClient) · config
+apps/      api (NestJS+Prisma) · worker (BullMQ) · fake-gen (Fastify stub provider) · web (Next.js)
+infra      docker-compose (+dev override) · Makefile · Dockerfiles · .env.example (zero real keys)
+```
+
+Built milestone-by-milestone (M1 foundation → M2 infra+fake-gen → M3a/b api+worker
+→ M4a/b sdk+web → M5 integration), each verified and committed, with two
+production-review→fix loops folded in (`git log` for the trail).
