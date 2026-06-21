@@ -1,0 +1,22 @@
+{
+  "name": "@dopamine/worker",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./src/index.ts",
+  "description": "Names the worker entrypoint in the monorepo layout (doc 05 §2). The worker and api are ONE codebase / ONE Docker image with two entrypoints; the real bootstrap lives in @dopamine/api's worker.ts and runs as the `worker` Docker role.",
+  "scripts": {
+    "dev": "pnpm --filter @dopamine/api dev:worker",
+    "start": "pnpm --filter @dopamine/api start:worker",
+    "build": "echo 'worker builds via @dopamine/api (shared image)'",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@dopamine/config": "workspace:*",
+    "@types/node": "22.12.0",
+    "eslint": "9.39.4",
+    "typescript": "6.0.3"
+  }
+}

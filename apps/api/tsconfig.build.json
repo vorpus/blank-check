@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Real emit for the production image (entrypoint runs `node dist/main.js`).
+    // We compile with `tsc` (not esbuild/tsup) because NestJS DI depends on
+    // `emitDecoratorMetadata`, which esbuild does not emit. CommonJS output is
+    // the canonical NestJS runtime model and lets us import the dual-published
+    // `@dopamine/contracts` via its `require` condition with no extension churn.
+    "noEmit": false,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "verbatimModuleSyntax": false,
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", ".turbo", "coverage", "src/**/*.test.ts", "src/**/*.spec.ts"]
+}

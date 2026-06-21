@@ -167,10 +167,15 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    # No HTTP port: liveness placeholder. Swap for a real /healthz probe once
-    # 01-backend-api.md exposes one on the worker (recommended).
+    # Real readiness probe (charter §5.5.7): the worker exposes a tiny /healthz on
+    # WORKER_HEALTH_PORT (default 8081) that pings Redis, so "healthy" means it can
+    # actually reach the BullMQ broker, not just that the process is alive.
     healthcheck:
-      test: ["CMD", "node", "-e", "process.exit(0)"]
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:8081/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 10s
       timeout: 3s
       retries: 6

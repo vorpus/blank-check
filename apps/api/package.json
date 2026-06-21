@@ -1,0 +1,55 @@
+{
+  "name": "@dopamine/api",
+  "version": "0.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "./dist/main.js",
+  "prisma": {
+    "seed": "node dist/seed.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "start": "node dist/main.js",
+    "start:worker": "node dist/worker.js",
+    "build": "prisma generate && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prisma": "prisma",
+    "openapi:dump": "tsx src/openapi-dump.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.726.0",
+    "@dopamine/contracts": "workspace:*",
+    "@fastify/static": "9.1.3",
+    "@nestjs/common": "11.0.5",
+    "@nestjs/core": "11.0.5",
+    "@nestjs/jwt": "11.0.0",
+    "@nestjs/platform-fastify": "11.0.5",
+    "@nestjs/swagger": "11.0.3",
+    "@prisma/client": "6.2.1",
+    "bullmq": "5.34.10",
+    "fastify": "5.6.1",
+    "ioredis": "5.4.2",
+    "nestjs-zod": "5.4.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.1",
+    "ulid": "2.3.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@dopamine/config": "workspace:*",
+    "@nestjs/testing": "11.0.5",
+    "@swc/core": "1.10.7",
+    "@types/node": "22.12.0",
+    "eslint": "9.39.4",
+    "prisma": "6.2.1",
+    "tsx": "4.20.6",
+    "typescript": "6.0.3",
+    "unplugin-swc": "1.5.1",
+    "vitest": "4.1.9"
+  }
+}

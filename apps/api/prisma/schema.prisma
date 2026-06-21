@@ -1,0 +1,241 @@
+// Dopamine — Stage 1 Prisma schema (doc 01 §3).
+//
+// Money is integer cents everywhere; currency is a column. Tables map to
+// snake_case via @@map. The COMPLETE Stage-1 schema is declared here (incl.
+// cart/order/fulfillment tables) so Milestone 3b needs no migration — but only
+// the generation-slice tables are *written* by Milestone 3a code.
+//
+// pgvector / embedding columns are intentionally ABSENT until Stage 2. FTS
+// tsvector + the GIN/pg_trgm indexes are added by a raw-SQL migration (the
+// generated column keeps search_doc in sync with no app-side maintenance).
+
+generator client {
+  provider = "prisma-client-js"
+  // Emit into the app's node_modules/.prisma so the shared Docker image can copy it.
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  // Extensions (pg_trgm, unaccent) are provisioned by infra/postgres/init and the
+  // raw-SQL FTS migration — not declared here (that needs the postgresqlExtensions
+  // preview). pgvector is intentionally absent until Stage 2.
+}
+
+// ── Identity ────────────────────────────────────────────────────────────────
+model User {
+  id        String   @id // usr_<ulid>
+  deviceId  String   @unique // anonymous identity key (charter §4.4) — dev_<ulid>
+  kind      String   @default("anonymous") // "anonymous" | "account" (Stage 4)
+  createdAt DateTime @default(now())
+  carts     Cart[]
+  orders    Order[]
+
+  @@map("users")
+}
+
+// ── Vertical registry (config rows; behavior is code in VerticalRegistry) ────
+model Vertical {
+  id              String       @id // "retail"
+  displayName     String
+  stateMachineKey String // "retail.v1"
+  config          Json         @default("{}")
+  generationOn    Boolean      @default(true)
+  storefronts     Storefront[]
+
+  @@map("verticals")
+}
+
+model Storefront {
+  id         String     @id // sto_<ulid>
+  verticalId String
+  vertical   Vertical   @relation(fields: [verticalId], references: [id])
+  name       String
+  theme      Json       @default("{}")
+  config     Json       @default("{}")
+  categories Category[]
+  listings   Listing[]
+
+  @@map("storefronts")
+}
+
+model Category {
+  id           String     @id // cat_<ulid>
+  storefrontId String
+  storefront   Storefront @relation(fields: [storefrontId], references: [id])
+  parentId     String?
+  parent       Category?  @relation("CatTree", fields: [parentId], references: [id])
+  children     Category[] @relation("CatTree")
+  name         String
+  slug         String
+  listings     Listing[]
+
+  @@unique([storefrontId, slug])
+  @@map("categories")
+}
+
+// ── Catalog ──────────────────────────────────────────────────────────────────
+model Listing {
+  id             String     @id // lst_<ulid>
+  storefrontId   String
+  storefront     Storefront @relation(fields: [storefrontId], references: [id])
+  verticalId     String // carried on every listing (charter §4.1)
+  categoryId     String?
+  category       Category?  @relation(fields: [categoryId], references: [id])
+  title          String
+  description    String
+  priceCents     Int // integer cents — never floats
+  currency       String     @default("USD")
+  attributes     Json       @default("{}") // per-vertical JSONB (size/color/specs)
+  media          Json       @default("{}") // Media block: { status, hero?, alternates, generation_id }
+  imageUrls      String[]   @default([]) // resolved MinIO URLs (mirror of media for fast reads)
+  origin         String // "seed" | "generated" | "exact_cache" | "semantic_reuse"
+  status         String     @default("ready") // "skeleton" | "placeholder" | "ready" | "degraded" | "generating_media"
+  canonicalQuery String? // dedup key; null for hand-seeded browse items
+  generationId   String? // correlates async images.ready (charter §4.2) for generated listings
+  // searchDoc tsvector + the GIN/trgm indexes are added via raw SQL migration (§3.1).
+  // ── STAGE 2 ADDS HERE: `embedding vector(1536)` + an HNSW index. NOT in Stage 1. ──
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  cartItems      CartItem[]
+
+  @@unique([storefrontId, canonicalQuery]) // idempotent generation write-back (doc 01 §4.4)
+  @@index([storefrontId, status])
+  @@index([generationId])
+  @@map("listings")
+}
+
+// ── Cart (Milestone 3b consumes; tables declared now) ────────────────────────
+model Cart {
+  id           String     @id // crt_<ulid>
+  userId       String
+  user         User       @relation(fields: [userId], references: [id])
+  storefrontId String
+  status       String     @default("active") // one active cart per (user, storefront)
+  version      Int        @default(0) // optimistic concurrency (doc 01 §8.2)
+  items        CartItem[]
+  updatedAt    DateTime   @updatedAt
+
+  // The one-active-cart-per-(user,storefront) partial-unique index is added via raw SQL.
+  @@map("carts")
+}
+
+model CartItem {
+  id             String  @id // cit_<ulid>
+  cartId         String
+  cart           Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  listingId      String
+  listing        Listing @relation(fields: [listingId], references: [id])
+  qty            Int
+  unitPriceCents Int // snapshot at add-time
+
+  @@unique([cartId, listingId])
+  @@map("cart_items")
+}
+
+// ── Orders (Milestone 3b consumes; tables declared now) ──────────────────────
+model Order {
+  id              String           @id // ord_<ulid>
+  userId          String
+  user            User             @relation(fields: [userId], references: [id])
+  verticalId      String // drives state-machine selection
+  storefrontId    String
+  state           String // current machine state
+  stateMachineKey String // pinned version, e.g. "retail.v1" (doc 01 §1.4)
+  totalCents      Int
+  currency        String           @default("USD")
+  idempotencyKey  String // place-order idempotency (charter §4.x)
+  metadata        Json             @default("{}")
+  seq             Int              @default(0) // per-order monotonic tracking seq (charter §4.3)
+  placedAt        DateTime         @default(now())
+  items           OrderItem[]
+  plan            FulfillmentPlan?
+  events          TrackingEvent[]
+
+  @@unique([userId, idempotencyKey]) // retried place-order returns the original
+  @@index([userId, placedAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                String @id // oit_<ulid>
+  orderId           String
+  order             Order  @relation(fields: [orderId], references: [id])
+  listingId         String
+  titleSnapshot     String // frozen at order time (doc 01 §1.2)
+  unitPriceSnapshot Int
+  qty               Int
+
+  @@map("order_items")
+}
+
+// ── Fulfillment / tracking (Milestone 3b consumes; tables declared now) ──────
+model FulfillmentPlan {
+  id          String    @id // ful_<ulid>
+  orderId     String    @unique
+  order       Order     @relation(fields: [orderId], references: [id])
+  verticalId  String
+  steps       Json // ordered [{ state, event, delayMs, terminal? }]
+  currentStep Int       @default(0)
+  nextTickAt  DateTime?
+
+  @@index([nextTickAt]) // ticker scan `WHERE nextTickAt <= now()`
+  @@map("fulfillment_plans")
+}
+
+model TrackingEvent {
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id])
+  seq        Int // per-order, gap-free, monotonic (charter §4.3)
+  type       String   @default("state_change")
+  state      String
+  label      String
+  payload    Json     @default("{}")
+  occurredAt DateTime @default(now())
+
+  @@id([orderId, seq]) // append-only replay log
+  @@map("tracking_events")
+}
+
+// ── Generation jobs (Milestone 3a) ───────────────────────────────────────────
+model GenerationJob {
+  id             String   @id // gjb_<ulid>
+  storefrontId   String
+  verticalId     String
+  canonicalQuery String
+  requestId      String   @unique // mirrors GenerationRequest.requestId
+  status         String   @default("pending") // pending|running|succeeded|degraded|failed
+  regime         String // "hot" | "warm" | "cold" (which grid regime spawned it)
+  batchSize      Int      @default(1)
+  generationId   String? // correlates async images.ready (charter §4.2) — batch id from fake-gen
+  error          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([storefrontId, canonicalQuery]) // collapse concurrent identical misses
+  @@index([generationId])
+  @@map("generation_jobs")
+}
+
+// ── Outbox (transactional event publication) ─────────────────────────────────
+model OutboxEvent {
+  id          String    @id // evt_<ulid>
+  type        String
+  payload     Json
+  status      String    @default("pending") // pending | published
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+
+  @@index([status, createdAt])
+  @@map("outbox_events")
+}
+
+// ── Inbox (consumer-side dedupe for at-least-once outbox delivery) ────────────
+model InboxEvent {
+  id          String // the OutboxEvent.id this consumer has processed
+  consumer    String // logical consumer name (e.g. "generation.enrich")
+  processedAt DateTime @default(now())
+
+  @@id([id, consumer], name: "inbox_pk")
+  @@map("inbox_events")
+}

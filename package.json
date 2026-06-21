@@ -19,6 +19,6 @@
     "turbo": "2.9.18"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": ["esbuild", "@swc/core", "@prisma/client", "@prisma/engines", "prisma"]
   }
 }
